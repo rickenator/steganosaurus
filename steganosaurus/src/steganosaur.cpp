@@ -1,4 +1,4 @@
-// turtle_fft_stego.cpp
+// steganosaur.cpp
 // Steganography via 2D FFT phase quantization using a keystream-driven "turtle" across RGB planes.
 // Build: g++ -std=c++17 -O3 -march=native turtle_fft_stego.cpp -o turtlefft
 
