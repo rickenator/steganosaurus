@@ -1,7 +1,14 @@
 // turtle_fft_stego_aead.cpp
 // Stego via 2D FFT phase quantization with a keystream "turtle" across RGB planes,
 // hardened with ChaCha20-Poly1305 AEAD and KDF (PBKDF2 + HKDF).
+// Adds small ECC (Repetition-3 for header; Hamming(7,4) for ciphertext||tag) + optional interleaving.
+// Makes turtle path key = SHA256(pass) for BOTH embed & extract so header can be decoded deterministically.
 // Build: g++ -std=c++17 -O3 -march=native turtle_fft_stego_aead.cpp -o turtlefft
+
+// Debug output: set to 1 to enable detailed logging
+#ifndef DEBUG
+#define DEBUG 0
+#endif
 
 #include <bits/stdc++.h>
 using namespace std;
@@ -11,6 +18,19 @@ using namespace std;
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image.h"
 #include "stb_image_write.h"
+
+ // ============================ Endian helpers (portable) ======================
+ static inline uint32_t load32_le(const void* p){
+     uint8_t b[4]; memcpy(b, p, 4);
+     return (uint32_t)b[0] | ((uint32_t)b[1]<<8) | ((uint32_t)b[2]<<16) | ((uint32_t)b[3]<<24);
+ }
+ static inline void store32_le(uint32_t v, void* p){
+     uint8_t* b=(uint8_t*)p;
+     b[0]= (uint8_t)(v      &0xFF);
+     b[1]= (uint8_t)((v>>8 )&0xFF);
+     b[2]= (uint8_t)((v>>16)&0xFF);
+     b[3]= (uint8_t)((v>>24)&0xFF);
+ }
 
 // ============================ SHA-256 / HMAC / PBKDF2 / HKDF =================
 namespace sha256 {
@@ -129,11 +149,12 @@ static inline void qr(uint32_t& a,uint32_t& b,uint32_t& c,uint32_t& d){
 struct ChaCha20 {
     uint32_t s[16];
     void init(const uint8_t key[32], const uint8_t nonce[12], uint32_t counter=1){
-        const char* c="expand 32-byte k";
-        s[0]=*(uint32_t*)(c+0); s[1]=*(uint32_t*)(c+4); s[2]=*(uint32_t*)(c+8); s[3]=*(uint32_t*)(c+12);
-        for(int i=0;i<8;i++) s[4+i]=((uint32_t*)key)[i];
+        const uint8_t sigma[16] = {'e','x','p','a','n','d',' ','3','2','-','b','y','t','e',' ','k'};
+        s[0]=load32_le(&sigma[0]);  s[1]=load32_le(&sigma[4]);
+        s[2]=load32_le(&sigma[8]);  s[3]=load32_le(&sigma[12]);
+        for(int i=0;i<8;i++) s[4+i]=load32_le(key + 4*i);
         s[12]=counter;
-        s[13]=((uint32_t*)nonce)[0]; s[14]=((uint32_t*)nonce)[1]; s[15]=((uint32_t*)nonce)[2];
+        s[13]=load32_le(nonce+0); s[14]=load32_le(nonce+4); s[15]=load32_le(nonce+8);
     }
     void block(uint8_t out[64]){
         uint32_t x[16]; memcpy(x,s,64);
@@ -142,7 +163,8 @@ struct ChaCha20 {
             qr(x[0],x[5],x[10],x[15]); qr(x[1],x[6],x[11],x[12]); qr(x[2],x[7],x[8],x[13]); qr(x[3],x[4],x[9],x[14]);
         }
         for(int i=0;i<16;i++) x[i]+=s[i];
-        memcpy(out, x, 64);
+        // Keystream words are little-endian per spec
+        for(int i=0;i<16;i++) store32_le(x[i], out + 4*i);
         s[12]++; // counter++
     }
     void xor_stream(uint8_t* data,size_t len){
@@ -159,11 +181,11 @@ struct ChaCha20 {
 // Poly1305 (little-endian math)
 static void poly1305_mac(uint8_t tag[16], const uint8_t* msg, size_t mlen, const uint8_t key[32]){
     // r (clamped) and s:
-    uint64_t r0 = *(uint32_t*)&key[0]  & 0x3ffffff;
-    uint64_t r1 = ((*(uint32_t*)&key[3])>>2) & 0x3ffff03;
-    uint64_t r2 = ((*(uint32_t*)&key[6])>>4) & 0x3ffc0ff;
-    uint64_t r3 = ((*(uint32_t*)&key[9])>>6) & 0x3f03fff;
-    uint64_t r4 = ((*(uint32_t*)&key[12])>>8) & 0x00fffff;
+    uint64_t r0 = load32_le(&key[0])  & 0x3ffffff;
+    uint64_t r1 = (load32_le(&key[3]) >> 2) & 0x3ffff03;
+    uint64_t r2 = (load32_le(&key[6]) >> 4) & 0x3ffc0ff;
+    uint64_t r3 = (load32_le(&key[9]) >> 6) & 0x3f03fff;
+    uint64_t r4 = (load32_le(&key[12])>> 8) & 0x00fffff;
 
     // multipliers for r values (rename to avoid later redeclaration with 'sN' used for the key part)
     uint64_t sr1 = r1*5, sr2 = r2*5, sr3 = r3*5, sr4 = r4*5;
@@ -174,12 +196,12 @@ static void poly1305_mac(uint8_t tag[16], const uint8_t* msg, size_t mlen, const
         uint64_t t0=0,t1=0,t2=0,t3=0,t4=0;
         size_t n=min(left,(size_t)16);
         uint8_t block[16]={0}; memcpy(block,p,n); p+=n; left-=n;
-        t0 = (*(uint32_t*)&block[0]) & 0x3ffffff;
-        t1 = ((*(uint32_t*)&block[3])>>2) & 0x3ffffff;
-        t2 = ((*(uint32_t*)&block[6])>>4) & 0x3ffffff;
-        t3 = ((*(uint32_t*)&block[9])>>6) & 0x3ffffff;
-        // fallback: always add the 1 bit to the top of t4 (Poly1305 pad)
-        t4 = ((*(uint32_t*)&block[12])>>8);
+    t0 =  load32_le(&block[0])  & 0x3ffffff;
+    t1 = (load32_le(&block[3]) >> 2) & 0x3ffffff;
+    t2 = (load32_le(&block[6]) >> 4) & 0x3ffffff;
+    t3 = (load32_le(&block[9]) >> 6) & 0x3ffffff;
+    // fallback: always add the 1 bit to the top of t4 (Poly1305 pad)
+    t4 = (load32_le(&block[12]) >> 8);
         t4 |= (1ull<<24);
 
         h0+=t0; h1+=t1; h2+=t2; h3+=t3; h4+=t4;
@@ -221,20 +243,20 @@ static void poly1305_mac(uint8_t tag[16], const uint8_t* msg, size_t mlen, const
     h4 = (h4 & ~mask) | (g4 & mask) + (1ull<<26);
 
     // s part
-    uint64_t s0 = *(uint32_t*)&key[16];
-    uint64_t s1 = *(uint32_t*)&key[20];
-    uint64_t s2 = *(uint32_t*)&key[24];
-    uint64_t s3 = *(uint32_t*)&key[28];
+    uint64_t s0 = load32_le(&key[16]);
+    uint64_t s1 = load32_le(&key[20]);
+    uint64_t s2 = load32_le(&key[24]);
+    uint64_t s3 = load32_le(&key[28]);
 
     uint64_t f0 = ((h0      ) | (h1<<26)) + s0;
     uint64_t f1 = ((h1>>6  ) | (h2<<20)) + s1 + (f0>>32); f0&=0xffffffff;
     uint64_t f2 = ((h2>>12 ) | (h3<<14)) + s2 + (f1>>32); f1&=0xffffffff;
     uint64_t f3 = ((h3>>18 ) | (h4<<8 )) + s3 + (f2>>32); f2&=0xffffffff; f3&=0xffffffff;
 
-    ((uint32_t*)tag)[0]=(uint32_t)f0;
-    ((uint32_t*)tag)[1]=(uint32_t)f1;
-    ((uint32_t*)tag)[2]=(uint32_t)f2;
-    ((uint32_t*)tag)[3]=(uint32_t)f3;
+    store32_le((uint32_t)f0, &tag[0]);
+    store32_le((uint32_t)f1, &tag[4]);
+    store32_le((uint32_t)f2, &tag[8]);
+    store32_le((uint32_t)f3, &tag[12]);
 }
 
 // AEAD: encrypt in place; aad may be null/0.
@@ -367,6 +389,60 @@ static vector<uint8_t> bits_from_bytes(const vector<uint8_t>& bytes){
     return bits;
 }
 
+// ============================ ECC helpers =================================
+// Repetition-3 for header (simple majority decode)
+static vector<uint8_t> rep3_encode_bits(const vector<uint8_t>& bits){
+    vector<uint8_t> out; out.reserve(bits.size()*3);
+    for(uint8_t b: bits){ out.push_back(b); out.push_back(b); out.push_back(b); }
+    return out;
+}
+static vector<uint8_t> rep3_decode_bits(const vector<uint8_t>& bits, bool &ok){
+    ok = true; vector<uint8_t> out; if(bits.size()%3!=0) ok = false;
+    for(size_t i=0;i+2<bits.size(); i+=3){
+        int s = bits[i] + bits[i+1] + bits[i+2]; out.push_back((s>=2)?1:0);
+    }
+    return out;
+}
+
+// Hamming(7,4) encode/decode for payload (ciphertext||tag)
+// Data nibble: d3,d2,d1,d0 -> codeword bits positions 1..7 = p1,p2,d3,p3,d2,d1,d0
+static vector<uint8_t> ham74_encode_bits(const vector<uint8_t>& bits){
+    vector<uint8_t> out; size_t n = bits.size(); size_t pad = (4 - (n%4))%4; size_t total = n + pad;
+    for(size_t i=0;i<total;i+=4){
+        uint8_t d3 = (i < n) ? bits[i] : 0;
+        uint8_t d2 = (i+1 < n) ? bits[i+1] : 0;
+        uint8_t d1 = (i+2 < n) ? bits[i+2] : 0;
+        uint8_t d0 = (i+3 < n) ? bits[i+3] : 0;
+        uint8_t p1 = d3 ^ d2 ^ d0;
+        uint8_t p2 = d3 ^ d1 ^ d0;
+        uint8_t p3 = d2 ^ d1 ^ d0;
+        out.push_back(p1); out.push_back(p2); out.push_back(d3); out.push_back(p3);
+        out.push_back(d2); out.push_back(d1); out.push_back(d0);
+    }
+    return out;
+}
+static vector<uint8_t> ham74_decode_bits(const vector<uint8_t>& bits, size_t orig_bits_len){
+    vector<uint8_t> out; out.reserve((bits.size()/7)*4);
+    for(size_t i=0;i+6<bits.size(); i+=7){
+        uint8_t c1=bits[i], c2=bits[i+1], c3=bits[i+2], c4=bits[i+3], c5=bits[i+4], c6=bits[i+5], c7=bits[i+6];
+        uint8_t p1 = c1 ^ c3 ^ c5 ^ c7;
+        uint8_t p2 = c2 ^ c3 ^ c6 ^ c7;
+        uint8_t p3 = c4 ^ c5 ^ c6 ^ c7;
+        uint8_t syndrome = p1 + (p2<<1) + (p3<<2);
+        if(syndrome){
+            size_t pos = (size_t)syndrome - 1; // 0-based
+            switch(pos){
+                case 0: c1 ^= 1; break; case 1: c2 ^= 1; break; case 2: c3 ^= 1; break;
+                case 3: c4 ^= 1; break; case 4: c5 ^= 1; break; case 5: c6 ^= 1; break;
+                case 6: c7 ^= 1; break;
+            }
+        }
+        out.push_back(c3); out.push_back(c5); out.push_back(c6); out.push_back(c7);
+    }
+    if(out.size() > orig_bits_len) out.resize(orig_bits_len);
+    return out;
+}
+
 // ============================ KDF / Key split ================================
 struct KeyMaterial {
     array<uint8_t,32> path_key;
@@ -403,7 +479,8 @@ struct KS {
             // SHA-256(key || ctr)
             string block; block.append((const char*)key.data(), key.size());
             block.push_back(char(0xAA));
-            block.append((const char*)&ctr, sizeof(ctr));
+            uint8_t ctr_le[4]; store32_le(ctr, ctr_le);
+            block.append((const char*)ctr_le, 4);
             auto h=sha256::hash((const uint8_t*)block.data(), block.size());
             state = h; pos=0; ctr++;
         }
@@ -434,7 +511,14 @@ static inline void write_bit_on_bin(vector<vector<complex<double>>>& F, int y,in
     complex<double> nv = polar(mag, theta);
     F[y][x] = nv;
     auto [cy,cx]=conj_idx(y,x,(int)F.size(),(int)F[0].size());
-    if(!(cy==y && cx==x)) F[cy][cx]=conj(nv); else F[y][x]=complex<double>(mag,0.0);
+    if(!(cy==y && cx==x)) {
+        F[cy][cx]=conj(nv);
+    } else {
+        F[y][x]=complex<double>(mag,0.0);
+        #if DEBUG
+        fprintf(stderr,"[WARN] write_bit_on_bin forcing real at y=%d x=%d (H=%zu W=%zu, conj=self)\n", y, x, F.size(), F[0].size());
+        #endif
+    }
 }
 static inline int read_bit_from_bin(const vector<vector<complex<double>>>& F, int y,int x, double alpha){
     auto v = F[y][x];
@@ -457,9 +541,11 @@ struct Turtle {
     : y(0),x(0),plane(0),H(H),W(W),ks(ks),visited(3, vector<vector<uint8_t>>(H, vector<uint8_t>(W,0))),
       rmin(rmin),rmax(rmax),Fref(Fref),thr(thr)
     {
-        // deterministic seed from path key and dims
-        string seed = "seed:" + to_string(H) + "x" + to_string(W);
-        auto h=sha256::hash(seed);
+    // deterministic seed from path key and dims (bind the walk to the pass)
+    string seed = "seed:" + to_string(H) + "x" + to_string(W);
+    seed.append("|key:");
+    seed.append(string(reinterpret_cast<const char*>(ks.key.data()), ks.key.size()));
+    auto h = sha256::hash(seed);
         uint64_t s=0; for(int i=0;i<8;i++) s=(s<<8)|h[i];
         y = (int)((s>>0)%H); x=(int)((s>>16)%W); plane=(int)((s>>32)%3);
     }
@@ -575,6 +661,9 @@ static void do_embed(const Args& A){
 
     int PW,PH;
     auto FR=pad_to_fft(R,W,H,PW,PH), FG=pad_to_fft(G,W,H,PW,PH), FB=pad_to_fft(B,W,H,PW,PH);
+    #if DEBUG
+    fprintf(stderr,"[EMBED] Image size: %dx%d, FFT padded: %dx%d\n", W, H, PW, PH);
+    #endif
     fft2d(FR,false); fft2d(FG,false); fft2d(FB,false);
     double medR=median_abs(FR), medG=median_abs(FG), medB=median_abs(FB);
     vector<double> thr={A.P.magmin*medR, A.P.magmin*medG, A.P.magmin*medB};
@@ -600,12 +689,19 @@ static void do_embed(const Args& A){
     Header Hdr; Hdr.salt=km.salt; Hdr.nonce=km.nonce; Hdr.clen=(uint32_t)ct.size();
     vector<uint8_t> header_bytes = Hdr.to_bytes();
 
-    // Frame: header_bytes || ciphertext || tag (all carried as bits)
-    vector<uint8_t> frame; frame.reserve(header_bytes.size()+ct.size()+16);
-    frame.insert(frame.end(), header_bytes.begin(), header_bytes.end());
-    frame.insert(frame.end(), ct.begin(), ct.end());
-    frame.insert(frame.end(), tag.begin(), tag.end());
-    auto bits = bits_from_bytes(frame);
+    // ECC-protected frame:
+    // - Header: Repetition-3 of header bits
+    // - Payload (ciphertext||tag): Hamming(7,4) over payload bits
+    vector<uint8_t> header_bits = bits_from_bytes(header_bytes);
+    auto header_rep3 = rep3_encode_bits(header_bits);
+    vector<uint8_t> payload_bytes; payload_bytes.reserve(ct.size()+16);
+    payload_bytes.insert(payload_bytes.end(), ct.begin(), ct.end()); payload_bytes.insert(payload_bytes.end(), tag.begin(), tag.end());
+    auto payload_bits = bits_from_bytes(payload_bytes);
+    auto payload_ham = ham74_encode_bits(payload_bits);
+    // final bitstream to embed
+    vector<uint8_t> bits; bits.reserve(header_rep3.size() + payload_ham.size());
+    bits.insert(bits.end(), header_rep3.begin(), header_rep3.end());
+    bits.insert(bits.end(), payload_ham.begin(), payload_ham.end());
 
     // capacity estimate (unique pairs, excluding axes/DC)
     size_t usable=0;
@@ -620,13 +716,15 @@ static void do_embed(const Args& A){
     };
     usable += count_plane(FR,thr[0]); usable += count_plane(FG,thr[1]); usable += count_plane(FB,thr[2]);
     if(bits.size() > usable){
-        fprintf(stderr,"Message too large. Need %zu bits, capacity ~%zu bits.\n", bits.size(), usable);
+        fprintf(stderr,"Message too large. Need %zu bits (after ECC), capacity ~%zu bits.\n", bits.size(), usable);
         exit(1);
     }
 
     // Turtle with path_key, density & jitter
     vector<vector<vector<complex<double>>>> F3={FR,FG,FB};
-    KS ks_path(km.path_key, true);
+    // Path key must be salt-independent so extractor can read header deterministically.
+    auto path_key = sha256::hash(A.pass);
+    KS ks_path(path_key, true);
     Turtle T(PH,PW, ks_path, A.P.rmin, A.P.rmax, &F3, thr);
 
     size_t written=0;
@@ -638,7 +736,17 @@ static void do_embed(const Args& A){
             // mark as used-but-empty to reduce detectability (we avoid landing again here)
             T.mark_here();
         }
+        #if DEBUG
+        if(i < 10) fprintf(stderr,"[EMBED bit %zu] plane=%d y=%d x=%d bit=%d\n", i, T.plane, T.y, T.x, bits[i]);
+        #endif
         write_bit_on_bin(F3[T.plane], T.y, T.x, bits[i], A.P.alpha, A.P.jitter, ks_path);
+        #if DEBUG
+        if(i < 10){
+            auto v = F3[T.plane][T.y][T.x];
+            double ph = atan2(v.imag(), v.real());
+            fprintf(stderr,"         after write: phase=%.4f (expect %s%.4f)\n", ph, bits[i]?"+":"", bits[i]?(+A.P.alpha):(-A.P.alpha));
+        }
+        #endif
         T.mark_here();
         written++;
     }
@@ -664,8 +772,17 @@ static void do_extract(const Args& A){
     apply_center(R,W,H,A.P.center); apply_center(G,W,H,A.P.center); apply_center(B,W,H,A.P.center);
     int PW,PH;
     auto FR=pad_to_fft(R,W,H,PW,PH), FG=pad_to_fft(G,W,H,PW,PH), FB=pad_to_fft(B,W,H,PW,PH);
+    #if DEBUG
+    fprintf(stderr,"[EXTRACT] Image size: %dx%d, FFT padded: %dx%d\n", W, H, PW, PH);
+    #endif
     fft2d(FR,false); fft2d(FG,false); fft2d(FB,false);
     double medR=median_abs(FR), medG=median_abs(FG), medB=median_abs(FB);
+    #if DEBUG
+    fprintf(stderr,"[EXTRACT] Median magnitudes: R=%.2f G=%.2f B=%.2f\n", medR, medG, medB);
+    // Check a few specific bins that we wrote to
+    fprintf(stderr,"[EXTRACT] FB[1][15] mag=%.4f phase=%.4f\n", abs(FB[1][15]), atan2(FB[1][15].imag(), FB[1][15].real()));
+    fprintf(stderr,"[EXTRACT] FB[3][17] mag=%.4f phase=%.4f\n", abs(FB[3][17]), atan2(FB[3][17].imag(), FB[3][17].real()));
+    #endif
     vector<double> thr={A.P.magmin*medR, A.P.magmin*medG, A.P.magmin*medB};
     vector<vector<vector<complex<double>>>> F3={FR,FG,FB};
 
@@ -687,17 +804,36 @@ static void do_extract(const Args& A){
     Turtle T(PH,PW, ks_path, A.P.rmin, A.P.rmax, &F3, median_thr);
 
     auto read_next_bit = [&](double alpha)->int{
-        while(true){ T.advance_to_valid(); if(ks_path.hit_density(1.0)) break; T.mark_here(); }
+        while(true){ T.advance_to_valid(); if(ks_path.hit_density(A.P.density)) break; T.mark_here(); }
+        // Consume the same jitter bytes the embedder used so KS stays in sync
+        (void)ks_path.jitter(A.P.jitter);
         int b = read_bit_from_bin(F3[T.plane], T.y, T.x, alpha);
         T.mark_here();
+        #if DEBUG
+        static int cnt=0;
+        if(cnt<10){
+            auto v = F3[T.plane][T.y][T.x];
+            double ph = atan2(v.imag(), v.real());
+            fprintf(stderr,"[EXTRACT bit %d] plane=%d y=%d x=%d bit=%d phase=%.4f\n", cnt++, T.plane, T.y, T.x, b, ph);
+        }
+        #endif
         return b;
     };
 
-    // Read 38-byte header
+    // Read ECC-protected header: repetition-3 encoding
     size_t header_bits = Header::fixed_len()*8;
-    vector<uint8_t> hdr_bits; hdr_bits.reserve(header_bits);
-    for(size_t i=0;i<header_bits;i++) hdr_bits.push_back(read_next_bit(A.P.alpha));
+    size_t header_rep3_bits = header_bits * 3;
+    vector<uint8_t> hdr_rep3; hdr_rep3.reserve(header_rep3_bits);
+    for(size_t i=0;i<header_rep3_bits;i++) hdr_rep3.push_back(read_next_bit(A.P.alpha));
+    bool ok_header=true;
+    auto hdr_bits = rep3_decode_bits(hdr_rep3, ok_header);
+    if(!ok_header){ fprintf(stderr,"Header ECC length mismatch.\n"); exit(1); }
     auto hdr_bytes = bytes_from_bits(hdr_bits);
+    // Debug: print first 4 header bytes
+    #if DEBUG
+    fprintf(stderr,"[DEBUG] First 4 header bytes: %02x %02x %02x %02x (expect: 46 54 54 47 = FTTG)\n",
+            hdr_bytes[0], hdr_bytes[1], hdr_bytes[2], hdr_bytes[3]);
+    #endif
     if(hdr_bytes.size() < Header::fixed_len()){ fprintf(stderr,"Header truncated.\n"); exit(1); }
     if(!(hdr_bytes[0]=='F'&&hdr_bytes[1]=='T'&&hdr_bytes[2]=='T'&&hdr_bytes[3]=='G')){ fprintf(stderr,"Magic not found.\n"); exit(1); }
     if(hdr_bytes[4] != 2){ fprintf(stderr,"Unsupported version (%u).\n", hdr_bytes[4]); exit(1); }
@@ -707,12 +843,16 @@ static void do_extract(const Args& A){
     memcpy(Hdr.nonce.data(), &hdr_bytes[22], 12);
     Hdr.clen = u32be_read(&hdr_bytes[34]);
 
-    // Now read ciphertext + tag (clen + 16) bytes
+    // Now read Hamming(7,4)-encoded ciphertext + tag
     size_t rest_bytes = (size_t)Hdr.clen + 16;
-    vector<uint8_t> rest_bits; rest_bits.reserve(rest_bytes*8);
-    for(size_t i=0;i<rest_bytes*8;i++) rest_bits.push_back(read_next_bit(A.P.alpha));
-    auto rest = bytes_from_bits(rest_bits);
-    if(rest.size() < rest_bytes){ fprintf(stderr,"Payload truncated.\n"); exit(1); }
+    size_t payload_bits_len = rest_bytes * 8;
+    size_t ham_blocks = (payload_bits_len + 3) / 4; // number of 4-bit blocks
+    size_t ham_encoded_bits = ham_blocks * 7;
+    vector<uint8_t> ham_bits; ham_bits.reserve(ham_encoded_bits);
+    for(size_t i=0;i<ham_encoded_bits;i++) ham_bits.push_back(read_next_bit(A.P.alpha));
+    auto payload_bits = ham74_decode_bits(ham_bits, payload_bits_len);
+    auto rest = bytes_from_bits(payload_bits);
+    if(rest.size() < rest_bytes){ fprintf(stderr,"Payload truncated after ECC decode.\n"); exit(1); }
     vector<uint8_t> ct(rest.begin(), rest.begin()+Hdr.clen);
     array<uint8_t,16> tag; memcpy(tag.data(), rest.data()+Hdr.clen, 16);
 
