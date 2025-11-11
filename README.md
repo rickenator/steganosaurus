@@ -109,11 +109,26 @@ Busy, high-texture images allow more embedding.
 
 ## SECURITY NOTES
 
-• Data is encrypted *and* authenticated: extraction with wrong passphrase yields no plaintext.  
-• Turtlewalk path prevents brute-force scanning of FFT bins.  
-• ECC enables some robustness to light resizing, compression, blur, etc.  
-• Very heavy JPEG compression may destroy phase-domain data.  
-• Strong passphrase is essential.  
+### Confidentiality & Integrity
+
+• **ChaCha20-Poly1305 AEAD** provides authenticated encryption (IND-CCA2 secure).  
+• **Header as AAD**: The message header (salt, nonce, ciphertext length) is authenticated as Additional Authenticated Data, preventing header tampering and oracle attacks.  
+• **PBKDF2 + HKDF** derive separate keys for AEAD encryption and turtle path selection from one passphrase (200,000 iterations default).  
+• Wrong passphrase → extraction fails cleanly with no plaintext leakage.
+
+### Stealth & Detectability
+
+• **Keyed turtlewalk**: Path derived from SHA256(passphrase) prevents brute-force scanning of FFT bins.  
+• **Per-plane independent keystreams**: R, G, B channels use separate HKDF-derived keys for jitter, reducing cross-channel coherence artifacts detectable by statistical analysis.  
+• **Phase-domain embedding**: FFT phase modifications are visually imperceptible (PSNR typically >50dB).  
+• **Density shaping**: Only a fraction of suitable bins are used, making statistical detection harder.
+
+### Robustness & Limitations
+
+• **ECC protection**: Hamming(7,4) + Repetition-3 enables some robustness to light image transformations (resizing, compression, blur).  
+• **Known-cover attacks**: This scheme is NOT secure against adversaries who possess the original cover image (they can compute FFT difference).  
+• **Lossy compression**: Heavy JPEG compression or aggressive filtering can destroy phase-domain data → extraction fails.  
+• **Passphrase strength**: Overall security depends on passphrase entropy. Use strong, unique passphrases.
 
 ---
 

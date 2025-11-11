@@ -531,20 +531,23 @@ static inline int read_bit_from_bin(const vector<vector<complex<double>>>& F, in
 
 // ============================ Turtle selection ===============================
 struct Turtle {
-    int y,x,plane,H,W; KS &ks;
+    int y,x,plane,H,W;
+    KS* ks_walk; // for turtle path selection
+    array<KS*,3> ks_planes; // per-plane keystreams for jitter
     vector<vector<vector<uint8_t>>> visited;
     double rmin, rmax;
     const vector<vector<vector<complex<double>>>>* Fref;
     vector<double> thr; // per-plane mag threshold
-    Turtle(int H,int W, KS& ks,double rmin,double rmax,
+    Turtle(int H,int W, KS* ks_walk, array<KS*,3> ks_planes,double rmin,double rmax,
            const vector<vector<vector<complex<double>>>>* Fref, vector<double> thr)
-    : y(0),x(0),plane(0),H(H),W(W),ks(ks),visited(3, vector<vector<uint8_t>>(H, vector<uint8_t>(W,0))),
+    : y(0),x(0),plane(0),H(H),W(W),ks_walk(ks_walk),ks_planes(ks_planes),visited(3, vector<vector<uint8_t>>(H, vector<uint8_t>(W,0))),
       rmin(rmin),rmax(rmax),Fref(Fref),thr(thr)
     {
     // deterministic seed from path key and dims (bind the walk to the pass)
+    // Use walk keystream's key for the turtle walk itself (path selection)
     string seed = "seed:" + to_string(H) + "x" + to_string(W);
     seed.append("|key:");
-    seed.append(string(reinterpret_cast<const char*>(ks.key.data()), ks.key.size()));
+    seed.append(string(reinterpret_cast<const char*>(ks_walk->key.data()), ks_walk->key.size()));
     auto h = sha256::hash(seed);
         uint64_t s=0; for(int i=0;i<8;i++) s=(s<<8)|h[i];
         y = (int)((s>>0)%H); x=(int)((s>>16)%W); plane=(int)((s>>32)%3);
@@ -557,6 +560,8 @@ struct Turtle {
         return abs((*Fref)[p][yy][xx]) >= thr[p];
     }
     void advance_to_valid(){
+        // Use walk keystream for turtle movement
+        KS& ks = *ks_walk;
         while(true){
             int op = ks.next_opcode3();
             switch(op){
@@ -674,20 +679,27 @@ static void do_embed(const Args& A){
     }
     auto km = derive_keys(A.pass, salt, A.P.pbkdf2_iter);
 
-    // AEAD encrypt secret
+    // Prepare header first (it will be AAD for AEAD)
+    Header Hdr; Hdr.salt=km.salt; Hdr.nonce=km.nonce; Hdr.clen=(uint32_t)A.secret.size();
+    vector<uint8_t> header_bytes = Hdr.to_bytes();
+    
+    #if DEBUG
+    fprintf(stderr,"[DEBUG EMBED] clen=%u, header_bytes[34..37]=%02x %02x %02x %02x\n",
+            Hdr.clen, header_bytes[34], header_bytes[35], header_bytes[36], header_bytes[37]);
+    #endif
+
+    // AEAD encrypt secret with header as AAD
     vector<uint8_t> pt(A.secret.begin(), A.secret.end());
     vector<uint8_t> ct = pt;
     array<uint8_t,16> tag{};
     {
         using namespace chacha_poly;
         if(!chacha20_poly1305_seal(km.aead_key.data(), km.nonce.data(),
-                                   nullptr, 0, ct.data(), ct.size(), tag.data())){
+                                   header_bytes.data(), header_bytes.size(),
+                                   ct.data(), ct.size(), tag.data())){
             fprintf(stderr,"AEAD seal failed\n"); exit(1);
         }
     }
-
-    Header Hdr; Hdr.salt=km.salt; Hdr.nonce=km.nonce; Hdr.clen=(uint32_t)ct.size();
-    vector<uint8_t> header_bytes = Hdr.to_bytes();
 
     // ECC-protected frame:
     // - Header: Repetition-3 of header bits
@@ -724,22 +736,38 @@ static void do_embed(const Args& A){
     vector<vector<vector<complex<double>>>> F3={FR,FG,FB};
     // Path key must be salt-independent so extractor can read header deterministically.
     auto path_key = sha256::hash(A.pass);
-    KS ks_path(path_key, true);
-    Turtle T(PH,PW, ks_path, A.P.rmin, A.P.rmax, &F3, thr);
+    
+    // Derive walk keystream and per-plane subkeys from path_key using HKDF
+    uint8_t sub[32*4]; // walk + R + G + B
+    const uint8_t info[] = "turtle_keys";
+    sha256::hkdf_sha256_expand(path_key.data(), info, sizeof(info)-1, sub, sizeof(sub));
+    array<uint8_t,32> key_walk, key_r, key_g, key_b;
+    memcpy(key_walk.data(), sub+0,   32);
+    memcpy(key_r.data(),    sub+32,  32);
+    memcpy(key_g.data(),    sub+64,  32);
+    memcpy(key_b.data(),    sub+96,  32);
+    KS ks_walk(key_walk, true);
+    KS ks_r(key_r, true);
+    KS ks_g(key_g, true);
+    KS ks_b(key_b, true);
+    array<KS*,3> ks_planes = {&ks_r, &ks_g, &ks_b};
+    
+    Turtle T(PH,PW, &ks_walk, ks_planes, A.P.rmin, A.P.rmax, &F3, thr);
 
     size_t written=0;
     for(size_t i=0;i<bits.size();++i){
         // advance to a candidate, but respect density: maybe skip this candidate (without consuming payload bit)
         while(true){
             T.advance_to_valid();
-            if(ks_path.hit_density(A.P.density)) break;
+            if(ks_walk.hit_density(A.P.density)) break;
             // mark as used-but-empty to reduce detectability (we avoid landing again here)
             T.mark_here();
         }
         #if DEBUG
         if(i < 10) fprintf(stderr,"[EMBED bit %zu] plane=%d y=%d x=%d bit=%d\n", i, T.plane, T.y, T.x, bits[i]);
         #endif
-        write_bit_on_bin(F3[T.plane], T.y, T.x, bits[i], A.P.alpha, A.P.jitter, ks_path);
+        // Use the keystream for the current plane
+        write_bit_on_bin(F3[T.plane], T.y, T.x, bits[i], A.P.alpha, A.P.jitter, *ks_planes[T.plane]);
         #if DEBUG
         if(i < 10){
             auto v = F3[T.plane][T.y][T.x];
@@ -799,14 +827,29 @@ static void do_extract(const Args& A){
 
     // Recompute thresholds and set up turtle with path_key = SHA256(pass)
     auto path_key = sha256::hash(A.pass);
-    KS ks_path(path_key, true);
+    
+    // Derive walk keystream and per-plane subkeys from path_key using HKDF
+    uint8_t sub[32*4]; // walk + R + G + B
+    const uint8_t info[] = "turtle_keys";
+    sha256::hkdf_sha256_expand(path_key.data(), info, sizeof(info)-1, sub, sizeof(sub));
+    array<uint8_t,32> key_walk, key_r, key_g, key_b;
+    memcpy(key_walk.data(), sub+0,   32);
+    memcpy(key_r.data(),    sub+32,  32);
+    memcpy(key_g.data(),    sub+64,  32);
+    memcpy(key_b.data(),    sub+96,  32);
+    KS ks_walk(key_walk, true);
+    KS ks_r(key_r, true);
+    KS ks_g(key_g, true);
+    KS ks_b(key_b, true);
+    array<KS*,3> ks_planes = {&ks_r, &ks_g, &ks_b};
+    
     auto median_thr = thr;
-    Turtle T(PH,PW, ks_path, A.P.rmin, A.P.rmax, &F3, median_thr);
+    Turtle T(PH,PW, &ks_walk, ks_planes, A.P.rmin, A.P.rmax, &F3, median_thr);
 
     auto read_next_bit = [&](double alpha)->int{
-        while(true){ T.advance_to_valid(); if(ks_path.hit_density(A.P.density)) break; T.mark_here(); }
+        while(true){ T.advance_to_valid(); if(ks_walk.hit_density(A.P.density)) break; T.mark_here(); }
         // Consume the same jitter bytes the embedder used so KS stays in sync
-        (void)ks_path.jitter(A.P.jitter);
+        (void)ks_planes[T.plane]->jitter(A.P.jitter);
         int b = read_bit_from_bin(F3[T.plane], T.y, T.x, alpha);
         T.mark_here();
         #if DEBUG
@@ -837,11 +880,25 @@ static void do_extract(const Args& A){
     if(hdr_bytes.size() < Header::fixed_len()){ fprintf(stderr,"Header truncated.\n"); exit(1); }
     if(!(hdr_bytes[0]=='F'&&hdr_bytes[1]=='T'&&hdr_bytes[2]=='T'&&hdr_bytes[3]=='G')){ fprintf(stderr,"Magic not found.\n"); exit(1); }
     if(hdr_bytes[4] != 2){ fprintf(stderr,"Unsupported version (%u).\n", hdr_bytes[4]); exit(1); }
+    
+    // Instead of parsing fields individually, just keep the original hdr_bytes for AAD
+    // But also parse for our use
     Header Hdr;
+    Hdr.magic[0]=hdr_bytes[0]; Hdr.magic[1]=hdr_bytes[1]; Hdr.magic[2]=hdr_bytes[2]; Hdr.magic[3]=hdr_bytes[3];
     Hdr.ver = hdr_bytes[4]; Hdr.flags=hdr_bytes[5];
     memcpy(Hdr.salt.data(),  &hdr_bytes[6], 16);
     memcpy(Hdr.nonce.data(), &hdr_bytes[22], 12);
+    
+    #if DEBUG
+    fprintf(stderr,"[DEBUG EXTRACT] hdr_bytes[34..37]=%02x %02x %02x %02x\n",
+            hdr_bytes[34], hdr_bytes[35], hdr_bytes[36], hdr_bytes[37]);
+    #endif
+    
     Hdr.clen = u32be_read(&hdr_bytes[34]);
+    
+    #if DEBUG
+    fprintf(stderr,"[DEBUG] Parsed header: clen=%u\n", Hdr.clen);
+    #endif
 
     // Now read Hamming(7,4)-encoded ciphertext + tag
     size_t rest_bytes = (size_t)Hdr.clen + 16;
@@ -858,10 +915,16 @@ static void do_extract(const Args& A){
 
     // Derive AEAD keys using PBKDF2(pass, salt)
     auto km = derive_keys(A.pass, Hdr.salt, A.P.pbkdf2_iter);
+    
+    // Use the original decoded header bytes directly for AAD verification
+    // (instead of reconstructing, to ensure exact match)
+    vector<uint8_t> header_aad(hdr_bytes.begin(), hdr_bytes.begin() + Header::fixed_len());
 
-    // Decrypt + verify
+    // Decrypt + verify with header as AAD
     using namespace chacha_poly;
-    if(!chacha20_poly1305_open(km.aead_key.data(), km.nonce.data(), nullptr, 0, ct.data(), ct.size(), tag.data())){
+    if(!chacha20_poly1305_open(km.aead_key.data(), km.nonce.data(),
+                               header_aad.data(), header_aad.size(),
+                               ct.data(), ct.size(), tag.data())){
         fprintf(stderr,"Auth failed (wrong pass or data corrupted).\n"); exit(1);
     }
     string secret(ct.begin(), ct.end());
