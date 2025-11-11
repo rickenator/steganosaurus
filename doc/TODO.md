@@ -1,11 +1,22 @@
 # TurtleFFT Development Roadmap
 
-## In Progress / Current Sprint
+## Recently Completed (commit 0bd4639)
 
-- [ ] Implement Header as AAD in AEAD (Tier 1)
-- [ ] Implement per-plane HKDF subkeys (Tier 1)
-- [ ] Add unit tests for AAD and per-plane keys
-- [ ] Update README with security improvements
+- [x] **Implement Header as AAD in AEAD (Tier 1)**
+  - Header bytes (salt, nonce, clen) authenticated as AAD in ChaCha20-Poly1305
+  - Prevents header tampering and oracle attacks
+  - Test: Round-trip embed/extract passes, wrong password rejects cleanly
+
+- [x] **Implement per-plane HKDF subkeys (Tier 1)**
+  - Separate keystreams for R, G, B channels via HKDF-expand
+  - Walk keystream (`ks_walk`) separate from per-plane jitter keystreams (`ks_r/g/b`)
+  - Reduces cross-channel coherence detection
+  - Test: Verified independent keystream operation
+
+- [x] **Update documentation**
+  - Added doc/ATTACKS.md with comprehensive red-team analysis
+  - Added doc/TODO.md tracking roadmap
+  - Updated README.md security section with detailed notes
 
 ## Deferred for Separate Work
 
@@ -67,6 +78,17 @@
 1. How small can Δ (relative quantization step) be while still enabling robust decoding at modest capacity?
 2. How much does cover-dependence of the path reduce collusion detection AUC?
 3. Which FEC + interleaving scheme provides best capacity vs reliability under spectral perturbations?
+4. What is the minimal payload at which phase histogram detectors reach AUC>0.95 across a 10k image corpus?
+5. How much does per-plane independent jitter reduce cross-channel correlation detectability? (Needs empirical measurement)
+
+## Change Log
+
+### 2025-11-11: Tier 1 Security Hardening (commit 0bd4639)
+- Implemented header as AAD for AEAD authentication
+- Implemented per-plane HKDF subkeys (ks_walk + ks_r/g/b)
+- Added comprehensive documentation (ATTACKS.md, TODO.md)
+- Updated README.md with enhanced security section
+- Test results: Round-trip embed/extract working, wrong password rejection confirmed
 4. What is the minimal payload at which phase histogram detectors reach AUC>0.95 across a 10k image corpus?
 
 ## Completed

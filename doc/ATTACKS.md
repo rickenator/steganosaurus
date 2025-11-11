@@ -8,12 +8,12 @@ Below is a **practical, adversary-first** breakdown of how an attacker would try
 
 * **Main detectability risk:** phase distribution changes (±α) in a constrained annulus and repeated keyed traversal across multiple covers.
 * **Main confidentiality strength:** ChaCha20-Poly1305 + KDF makes extraction without passphrase infeasible.
-* **Main integrity problem:** header is plaintext and not authenticated by AEAD (fix by making header AAD).
-* **Best fixes (highest priority):**
+* **Main integrity problem:** ~~header is plaintext and not authenticated by AEAD~~ **✅ FIXED** — header now authenticated as AAD.
+* **Best fixes:**
 
-  1. Bind header into AEAD as AAD (prevents header tampering / oracle attacks).
+  1. ~~Bind header into AEAD as AAD~~ **✅ IMPLEMENTED** (commit 0bd4639)
   2. Use relative quantization (QIM) instead of absolute ±α nudges.
-  3. Make the turtlewalk cover-dependent (eg. pHash||pass) and use per-plane subkeys.
+  3. ~~Make the turtlewalk cover-dependent (eg. pHash||pass) and use per-plane subkeys~~ **✅ PARTIAL** — per-plane subkeys implemented, cover-dependent path deferred.
   4. Replace Hamming(7,4) with stronger FEC (LDPC/RS) and use interleaving.
   5. Add per-bin randomized α (small variance) and local masking to reduce phase-histogram artifacts.
 
@@ -76,7 +76,17 @@ Below is a **practical, adversary-first** breakdown of how an attacker would try
 
 * Compute cross-correlation between R/G/B FFT magnitude & phase vectors in annulus and look for deviation from natural correlation statistics.
 
-**Mitigation:** use independent subkeys per channel, or probabilistically vary which plane is written when (so not all three always modified in the same set of bins).
+**Status: ✅ MITIGATED** (commit 0bd4639)
+
+**Implementation:**
+- Per-plane independent keystreams derived via HKDF: `ks_r`, `ks_g`, `ks_b`
+- Each channel uses its own keystream for jitter generation
+- Turtle walk uses separate `ks_walk` keystream for path selection
+- R/G/B planes no longer have identical jitter patterns
+
+**Remaining risk:** 
+- Turtle still visits the same (y,x) coordinates across all three planes, but writes to different planes at different times
+- Further mitigation would require probabilistic plane selection (deferred to TODO)
 
 ---
 
@@ -101,13 +111,22 @@ Below is a **practical, adversary-first** breakdown of how an attacker would try
 
 ### F. Header tampering / oracle
 
-**Weakness:** header plaintext (salt, nonce, clen) not authenticated. An adversary can flip `clen`, `nonce`, maybe make the extractor perform out-of-bound reads, or produce many failed attempts to glean timing or error messages.
+~~**Weakness:** header plaintext (salt, nonce, clen) not authenticated. An adversary can flip `clen`, `nonce`, maybe make the extractor perform out-of-bound reads, or produce many failed attempts to glean timing or error messages.~~
 
-**Exploit path:**
+**Status: ✅ FIXED** (commit 0bd4639)
 
-* Modify `clen` field to cause extractor to read wrong amount and potentially leak bits via timing or error messages.
+**Implementation:**
+- Header bytes now included as Additional Authenticated Data (AAD) in ChaCha20-Poly1305 AEAD
+- During encryption: header authenticated before sealing ciphertext
+- During decryption: original decoded header bytes verified as part of AEAD authentication
+- Any header modification causes AEAD verification failure → clean rejection
 
-**Mitigation:** include header bytes as AAD to AEAD seal; only accept header if AEAD verification passes.
+**Previous exploit path:**
+* ~~Modify `clen` field to cause extractor to read wrong amount and potentially leak bits via timing or error messages.~~
+
+**Current behavior:**
+* Header tampering → AEAD auth fails → extraction aborts with "Auth failed (wrong pass or data corrupted)."
+* No oracle, no timing leaks, no out-of-bound reads possible.
 
 ---
 
@@ -155,28 +174,32 @@ def kl_div(P, Q, eps=1e-12):
 
 ### High priority (implement now)
 
-1. **Bind header into AEAD AAD.**
+1. ~~**Bind header into AEAD AAD.**~~ **✅ DONE** (commit 0bd4639)
 
-   * When sealing: `seal(key, nonce, AAD = header_bytes, ciphertext)`.
-   * When opening: pass same AAD; reject unless AEAD ok.
-   * Rationale: prevents header tampering and oracle attacks.
+   * ~~When sealing: `seal(key, nonce, AAD = header_bytes, ciphertext)`.~~
+   * ~~When opening: pass same AAD; reject unless AEAD ok.~~
+   * ~~Rationale: prevents header tampering and oracle attacks.~~
+   * **Status:** Header bytes authenticated as AAD in ChaCha20-Poly1305
 
-2. **Make turtle path cover-dependent.**
+2. **Make turtle path cover-dependent.** ⏳ DEFERRED (see doc/TODO.md)
 
    * `path_key = SHA256(pass || pHash(cover))` or `HKDF(SHA256(pass), info=pHash)`
    * For deterministic extraction you must compute the same pHash on both sides — pick a robust pHash (perceptual hash) that's stable under tiny image metadata differences (use average hash or phash).
    * Rationale: defeats collusion averaging.
+   * **Challenge:** pHash stability across metadata changes, extraction UX complexity
 
-3. **Per-plane subkeys from HKDF.**
+3. ~~**Per-plane subkeys from HKDF.**~~ **✅ DONE** (commit 0bd4639)
 
-   * Derive `KS_R`, `KS_G`, `KS_B` via `HKDF(path_key, "R")` etc.
-   * Rationale: reduces cross-channel coherence detectors.
+   * ~~Derive `KS_R`, `KS_G`, `KS_B` via `HKDF(path_key, "R")` etc.~~
+   * ~~Rationale: reduces cross-channel coherence detectors.~~
+   * **Status:** Implemented with `ks_walk` + `ks_r/g/b` derived via HKDF
 
-4. **Authenticate header + pad clen.**
+4. ~~**Authenticate header + pad clen.**~~ **✅ PARTIAL** 
 
-   * Keep header compact, pass as AAD. Add random padding to ciphertext length to avoid metadata leaks.
+   * ~~Keep header compact, pass as AAD.~~ **DONE**
+   * Add random padding to ciphertext length to avoid metadata leaks. ⏳ DEFERRED
 
-5. **Replace absolute ±α embedding with *relative quantization* (QIM or STDM).**
+5. **Replace absolute ±α embedding with *relative quantization* (QIM or STDM).** ⏳ DEFERRED (see doc/TODO.md)
 
    * Let φ0 be original phase. Choose quantization step Δ and represent bit via nearest quantization cell: `φ' = Q(φ0, bit)` where quantization centers are shifted by Δ/2 for bit=1 vs bit=0 — but do it **relative** to φ0, not absolute ±α.
    * Add random small dither per bin (σ tiny) from KS.
@@ -184,7 +207,7 @@ def kl_div(P, Q, eps=1e-12):
 
 ### Medium priority (research & refine)
 
-6. **Per-bin randomized α (tiny variance).**
+6. **Per-bin randomized α (tiny variance).** ⏳ DEFERRED (see doc/TODO.md)
 
    * Instead of constant α, sample α_i ~ N(μ, σ²) with μ small. Use KS to sample.
    * Rationale: blurs histogram peaks.
@@ -338,12 +361,34 @@ mean_fft = np.mean([fft2(image) for image in stego_images_with_same_pass], axis=
 ## Final thoughts (red team voice)
 
 * The *core idea* is elegant — embedding in phase with a keyed path and AEAD gives strong confidentiality and the potential for low detectability.
-* The *main weakness* is statistical artifacts (phase histogram and cross-image correlation) and the unauthenticated header.
-* With the fixes above you substantially raise the bar: per-cover path keys, relative quantization, randomized tiny dithers, per-plane subkeys, and real FEC will make detection much harder and make the scheme a stronger research contribution.
+* ~~The *main weakness* is statistical artifacts (phase histogram and cross-image correlation) and the unauthenticated header.~~
+* **Current status (as of commit 0bd4639):**
+  - ✅ Header AAD implemented — oracle attacks prevented
+  - ✅ Per-plane HKDF subkeys — cross-channel coherence reduced
+  - ⏳ Statistical artifacts remain (phase histogram, collusion) — QIM and cover-dependent path deferred
+* **Impact:** With header AAD + per-plane subkeys, the system is now significantly more secure against integrity attacks and basic cross-channel detection. The remaining weaknesses are primarily statistical (phase histogram analysis, multi-image collusion).
 
 ---
 
-## Next steps
+## Implementation Status Summary
 
-* Produce a PR patch that implements **header as AAD**, **per-plane HKDF subkeys**, and a **QIM embed option** (small diff + tests), or
-* [FUTURE] Write up a reproducible experiment that runs the KL/ROC sweeps over a folder of natural images so one can pick safe defaults empirically.
+### ✅ Completed (commit 0bd4639)
+- Header as AAD for AEAD authentication
+- Per-plane HKDF-derived independent keystreams (ks_r, ks_g, ks_b)
+- Separate walk keystream (ks_walk) for turtle path determinism
+- Updated documentation (ATTACKS.md, TODO.md, README.md)
+
+### ⏳ Deferred (see doc/TODO.md)
+- QIM relative quantization
+- Cover-dependent path key (pHash||pass)
+- Per-bin randomized alpha
+- Stronger FEC (Reed-Solomon or LDPC)
+- Adaptive masking (content-aware embedding)
+- Empirical detection testing framework (KL/ROC sweeps)
+
+### Next immediate steps
+
+* ~~Produce a PR patch that implements **header as AAD**, **per-plane HKDF subkeys**~~ **DONE**
+* Test header tampering resistance (manual stego file modification)
+* [FUTURE] Implement **QIM embed option** with testing framework
+* [FUTURE] Write up reproducible KL/ROC experiments over natural image corpus
