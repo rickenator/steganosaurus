@@ -196,12 +196,12 @@ static void poly1305_mac(uint8_t tag[16], const uint8_t* msg, size_t mlen, const
         uint64_t t0=0,t1=0,t2=0,t3=0,t4=0;
         size_t n=min(left,(size_t)16);
         uint8_t block[16]={0}; memcpy(block,p,n); p+=n; left-=n;
-    t0 =  load32_le(&block[0])  & 0x3ffffff;
-    t1 = (load32_le(&block[3]) >> 2) & 0x3ffffff;
-    t2 = (load32_le(&block[6]) >> 4) & 0x3ffffff;
-    t3 = (load32_le(&block[9]) >> 6) & 0x3ffffff;
-    // fallback: always add the 1 bit to the top of t4 (Poly1305 pad)
-    t4 = (load32_le(&block[12]) >> 8);
+    	t0 =  load32_le(&block[0])  & 0x3ffffff;
+    	t1 = (load32_le(&block[3]) >> 2) & 0x3ffffff;
+    	t2 = (load32_le(&block[6]) >> 4) & 0x3ffffff;
+    	t3 = (load32_le(&block[9]) >> 6) & 0x3ffffff;
+    	// fallback: always add the 1 bit to the top of t4 (Poly1305 pad)
+    	t4 = (load32_le(&block[12]) >> 8);
         t4 |= (1ull<<24);
 
         h0+=t0; h1+=t1; h2+=t2; h3+=t3; h4+=t4;
