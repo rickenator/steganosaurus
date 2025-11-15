@@ -1,3 +1,0 @@
-/home/runner/work/steganosaurus/steganosaurus/steganosaurus/build/CMakeFiles/turtlefft.dir
-/home/runner/work/steganosaurus/steganosaurus/steganosaurus/build/CMakeFiles/edit_cache.dir
-/home/runner/work/steganosaurus/steganosaurus/steganosaurus/build/CMakeFiles/rebuild_cache.dir
