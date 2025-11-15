@@ -1,5 +1,5 @@
 CMakeFiles/turtlefft.dir/src/steganosaur.cpp.o: \
- /workspaces/steganosaurus/steganosaurus/src/steganosaur.cpp \
+ /home/runner/work/steganosaurus/steganosaurus/steganosaurus/src/steganosaur.cpp \
  /usr/include/stdc-predef.h \
  /usr/include/x86_64-linux-gnu/c++/13/bits/stdc++.h \
  /usr/include/c++/13/cassert \
@@ -330,10 +330,10 @@ CMakeFiles/turtlefft.dir/src/steganosaur.cpp.o: \
  /usr/include/c++/13/filesystem /usr/include/c++/13/bits/fs_fwd.h \
  /usr/include/c++/13/bits/fs_path.h /usr/include/c++/13/bits/fs_dir.h \
  /usr/include/c++/13/bits/fs_ops.h /usr/include/c++/13/memory_resource \
- /workspaces/steganosaurus/steganosaurus/include/stb_image.h \
+ /home/runner/work/steganosaurus/steganosaurus/steganosaurus/include/stb_image.h \
  /usr/include/c++/13/stdlib.h /usr/include/c++/13/math.h \
  /usr/lib/gcc/x86_64-linux-gnu/13/include/emmintrin.h \
  /usr/lib/gcc/x86_64-linux-gnu/13/include/xmmintrin.h \
  /usr/lib/gcc/x86_64-linux-gnu/13/include/mmintrin.h \
  /usr/lib/gcc/x86_64-linux-gnu/13/include/mm_malloc.h \
- /workspaces/steganosaurus/steganosaurus/include/stb_image_write.h
+ /home/runner/work/steganosaurus/steganosaurus/steganosaurus/include/stb_image_write.h
