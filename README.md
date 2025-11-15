@@ -95,9 +95,13 @@ If the passphrase is wrong, output will fail cleanly.
 | `rmin/rmax` | 0.05 / 0.45 | Radial region of FFT to embed in |
 | `magmin` | 0.01 | Minimum magnitude needed for embedding |
 | `center` | 0 | FFT center-shift toggle |
-| `pbkdf2_iter` | 200000 | Passphrase strengthening iterations |
+| `pbkdf2_iter` | 600000 | Passphrase strengthening iterations (hardened) |
+| `adaptive_alpha` | 0 | Adaptive phase shift (experimental) |
+| `cover_dependent_path` | 0 | Cover-dependent turtlewalk (experimental) |
 
 **Important:** Extractor must use the same `density`, `magmin`, `jitter`, and `pbkdf2_iter` as embedder.
+
+**Hardening Note:** Default PBKDF2 iterations increased to 600,000 (from 200,000) providing ~6 second key derivation time for strong brute-force resistance.
 
 ---
 
@@ -119,7 +123,9 @@ Busy, high-texture images allow more embedding.
 
 • **ChaCha20-Poly1305 AEAD** provides authenticated encryption (IND-CCA2 secure).  
 • **Header as AAD**: The message header (salt, nonce, ciphertext length) is authenticated as Additional Authenticated Data, preventing header tampering and oracle attacks.  
-• **PBKDF2 + HKDF** derive separate keys for AEAD encryption and turtle path selection from one passphrase (200,000 iterations default).  
+• **PBKDF2 + HKDF** derive separate keys for AEAD encryption and turtle path selection from one passphrase (600,000 iterations default).  
+• **Constant-time MAC verification**: Poly1305 tag comparison uses constant-time comparison to prevent timing attacks.  
+• **Key derivation hardening**: 600,000 PBKDF2 iterations (~6 seconds) provides strong resistance to passphrase brute-force attacks.  
 • Wrong passphrase → extraction fails cleanly with no plaintext leakage.
 
 ### Stealth & Detectability
@@ -128,6 +134,11 @@ Busy, high-texture images allow more embedding.
 • **Per-plane independent keystreams**: R, G, B channels use separate HKDF-derived keys for jitter, reducing cross-channel coherence artifacts detectable by statistical analysis.  
 • **Phase-domain embedding**: FFT phase modifications are visually imperceptible (PSNR typically >50dB).  
 • **Density shaping**: Only a fraction of suitable bins are used, making statistical detection harder.
+
+### Experimental Features
+
+• **Adaptive phase shift** (`--adaptive_alpha 1`): Scales embedding strength based on local magnitude. Currently experimental - may cause decoding issues.  
+• **Cover-dependent path** (`--cover_dependent_path 1`): Binds turtlewalk to cover image spectral hash. Currently experimental - sensitive to embedding changes.
 
 ### Robustness & Limitations
 
