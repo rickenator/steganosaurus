@@ -1,3 +1,9 @@
+## Turtlewalk Frequency-Domain Embedding Path
+
+<p align="center">
+  <img src="doc/turtlewalk_fixed2.svg" alt="Turtlewalk FFT Path Diagram" width="650px">
+</p>
+
 # TurtleFFT
 
 TurtleFFT is a frequency-domain steganography system that hides encrypted data inside the *phase* of a 2D FFT of an image.
