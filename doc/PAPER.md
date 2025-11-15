@@ -88,14 +88,10 @@ The architecture consists of four components:
 
 ## **2.2 Diagram**
 
-Include the SVG exactly as rendered:
+Turtlewalk Frequency-Domain Embedding Diagram
 
-```markdown
-## Turtlewalk Frequency-Domain Embedding Diagram
-![Turtlewalk Diagram](doc/turtlewalk_fixed2.svg)
-```
+![Turtlewalk Diagram](turtlewalk_fixed2.svg)
 
----
 
 # **3. Results**
 
