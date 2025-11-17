@@ -19,6 +19,12 @@ using namespace std;
 #include "stb_image.h"
 #include "stb_image_write.h"
 
+// Securely wipe sensitive buffers to reduce the chance of key/nonce leakage.
+static inline void secure_zero(void* ptr, size_t len){
+    volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
+    while(len--) *p++ = 0;
+}
+
  // ============================ Endian helpers (portable) ======================
  static inline uint32_t load32_le(const void* p){
      uint8_t b[4]; memcpy(b, p, 4);
@@ -277,6 +283,8 @@ static bool chacha20_poly1305_seal(const uint8_t key[32], const uint8_t nonce[12
     mac.insert(mac.end(), la.begin(), la.end());
     mac.insert(mac.end(), lc.begin(), lc.end());
     poly1305_mac(tag, mac.data(), mac.size(), otk);
+    if(!mac.empty()) secure_zero(mac.data(), mac.size());
+    secure_zero(otk, sizeof(otk));
     return true;
 }
 static bool chacha20_poly1305_open(const uint8_t key[32], const uint8_t nonce[12],
@@ -301,6 +309,9 @@ static bool chacha20_poly1305_open(const uint8_t key[32], const uint8_t nonce[12
         diff |= (mytag[i] ^ tag[i]);
     }
     tags_match = (diff == 0);
+    if(!mac.empty()) secure_zero(mac.data(), mac.size());
+    secure_zero(otk, sizeof(otk));
+    secure_zero(mytag, sizeof(mytag));
     if(!tags_match) return false;
     ChaCha20 c; c.init(key, nonce, 1); c.xor_stream(data, len);
     return true;
@@ -517,6 +528,9 @@ static KeyMaterial derive_keys(const string& pass, const array<uint8_t,16>& salt
     memcpy(km.aead_key.data(), out+32, 32);
     memcpy(km.nonce.data(), out+64, 12);
     km.salt = salt;
+    secure_zero(out, sizeof(out));
+    secure_zero(prk, sizeof(prk));
+    secure_zero(dk.data(), dk.size());
     return km;
 }
 
@@ -525,9 +539,10 @@ struct KS {
     array<uint8_t,32> state{};
     size_t pos=32;
     uint32_t ctr=0;
-    explicit KS(const array<uint8_t,32>& key){ state.fill(0); }
+    int bitpool=0;
+    int bits=0;
     array<uint8_t,32> key;
-    KS(const array<uint8_t,32>& k, bool init): key(k) { (void)init; }
+    explicit KS(const array<uint8_t,32>& k): key(k) { state.fill(0); }
     uint8_t next_byte(){
         if(pos>=32){
             // SHA-256(key || ctr)
@@ -540,7 +555,7 @@ struct KS {
         }
         return state[pos++];
     }
-    int next_opcode3(){ static int bitpool=0,bits=0; while(bits<3){ bitpool=(bitpool<<8)|next_byte(); bits+=8; } int op=(bitpool>>(bits-3))&7; bits-=3; return op; }
+    int next_opcode3(){ while(bits<3){ bitpool=(bitpool<<8)|next_byte(); bits+=8; } int op=(bitpool>>(bits-3))&7; bits-=3; return op; }
     bool hit_density(double density){ // return true if we embed on this candidate
         // uniform 0..255 < density*256
         return next_byte() < (uint8_t)floor(density*256.0);
@@ -589,16 +604,17 @@ static inline void write_bit_on_bin(vector<vector<complex<double>>>& F, int y,in
     }
 }
 
-static inline int read_bit_from_bin(const vector<vector<complex<double>>>& F, int y,int x, 
-                                   double base_alpha, double median_mag, bool adaptive_alpha){
+static inline int read_bit_from_bin(const vector<vector<complex<double>>>& F, int y,int x,
+                                   double base_alpha, double jitter_offset, double median_mag, bool adaptive_alpha){
     auto v = F[y][x];
     double th = atan2(v.imag(), v.real());
-    // For reading, always use base alpha as the decision boundary
-    // Adaptive alpha is only used for embedding strength, not decoding threshold
-    double alpha = base_alpha; // Always use base alpha for consistent decoding
-    // decide by proximity to +alpha vs -alpha
-    double dpos = fabs(th - (+alpha));
-    double dneg = fabs(th - (-alpha));
+    double mag = max(1e-12, abs(v));
+    double alpha = compute_adaptive_alpha(base_alpha, mag, median_mag, adaptive_alpha);
+    auto ang_diff = [](double a,double b){ double d = fmod(a - b + M_PI, 2*M_PI); if(d < 0) d += 2*M_PI; return fabs(d - M_PI); };
+    double pos = jitter_offset + alpha;
+    double neg = jitter_offset - alpha;
+    double dpos = ang_diff(th, pos);
+    double dneg = ang_diff(th, neg);
     return (dpos <= dneg) ? 1 : 0;
 }
 
@@ -844,10 +860,10 @@ static void do_embed(const Args& A){
     memcpy(key_r.data(),    sub+32,  32);
     memcpy(key_g.data(),    sub+64,  32);
     memcpy(key_b.data(),    sub+96,  32);
-    KS ks_walk(key_walk, true);
-    KS ks_r(key_r, true);
-    KS ks_g(key_g, true);
-    KS ks_b(key_b, true);
+    KS ks_walk(key_walk);
+    KS ks_r(key_r);
+    KS ks_g(key_g);
+    KS ks_b(key_b);
     array<KS*,3> ks_planes = {&ks_r, &ks_g, &ks_b};
     
     // Compute median magnitudes for adaptive alpha
@@ -954,10 +970,10 @@ static void do_extract(const Args& A){
     memcpy(key_r.data(),    sub+32,  32);
     memcpy(key_g.data(),    sub+64,  32);
     memcpy(key_b.data(),    sub+96,  32);
-    KS ks_walk(key_walk, true);
-    KS ks_r(key_r, true);
-    KS ks_g(key_g, true);
-    KS ks_b(key_b, true);
+    KS ks_walk(key_walk);
+    KS ks_r(key_r);
+    KS ks_g(key_g);
+    KS ks_b(key_b);
     array<KS*,3> ks_planes = {&ks_r, &ks_g, &ks_b};
     
     // Compute median magnitudes for adaptive alpha
@@ -969,8 +985,8 @@ static void do_extract(const Args& A){
     auto read_next_bit = [&](double alpha)->int{
         while(true){ T.advance_to_valid(); if(ks_walk.hit_density(A.P.density)) break; T.mark_here(); }
         // Consume the same jitter bytes the embedder used so KS stays in sync
-        (void)ks_planes[T.plane]->jitter(A.P.jitter);
-        int b = read_bit_from_bin(F3[T.plane], T.y, T.x, alpha, median_mags[T.plane], A.P.adaptive_alpha);
+        double j = ks_planes[T.plane]->jitter(A.P.jitter);
+        int b = read_bit_from_bin(F3[T.plane], T.y, T.x, alpha, j, median_mags[T.plane], A.P.adaptive_alpha);
         T.mark_here();
         #if DEBUG
         static int cnt=0;
