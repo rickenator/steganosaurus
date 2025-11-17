@@ -1,1 +1,8 @@
-steganosaurus/build/
+build/
+*.o
+*.d
+turtlefft
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
