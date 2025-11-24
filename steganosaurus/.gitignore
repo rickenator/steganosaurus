@@ -1,4 +1,5 @@
 build/
+_codeql_build_dir/
 *.o
 *.d
 *.a
