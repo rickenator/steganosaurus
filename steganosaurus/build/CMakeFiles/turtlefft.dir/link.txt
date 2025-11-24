@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/turtlefft.dir/src/steganosaur.cpp.o -o turtlefft 
