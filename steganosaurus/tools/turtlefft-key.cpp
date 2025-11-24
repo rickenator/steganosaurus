@@ -108,7 +108,15 @@ bool parse_args(int argc, char* argv[], Args& args) {
                 std::cerr << "Error: --pbkdf2-iters requires an argument" << std::endl;
                 return false;
             }
-            args.pbkdf2_iters = static_cast<uint32_t>(std::stoul(argv[++i]));
+            unsigned long val = std::stoul(argv[++i]);
+            // Validate iteration count bounds
+            constexpr unsigned long MIN_ITERS = 1000;
+            constexpr unsigned long MAX_ITERS = 10000000;
+            if (val < MIN_ITERS || val > MAX_ITERS) {
+                std::cerr << "Error: --pbkdf2-iters must be between " << MIN_ITERS << " and " << MAX_ITERS << std::endl;
+                return false;
+            }
+            args.pbkdf2_iters = static_cast<uint32_t>(val);
         } else if (arg == "--help" || arg == "-h") {
             args.help = true;
         } else {

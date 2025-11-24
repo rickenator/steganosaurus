@@ -298,9 +298,7 @@ bool aead_chacha20_poly1305_encrypt(
     poly1305_mac(tag_out, mac_input.data(), mac_input.size(), otk);
 
     // Clean up sensitive data
-    if (!mac_input.empty()) {
-        secure_zero(mac_input.data(), mac_input.size());
-    }
+    secure_zero(mac_input.data(), mac_input.size());
     secure_zero(otk, sizeof(otk));
 
     return true;
@@ -335,9 +333,7 @@ bool aead_chacha20_poly1305_decrypt(
     bool tags_match = constant_time_compare(expected_tag, tag, 16);
 
     // Clean up
-    if (!mac_input.empty()) {
-        secure_zero(mac_input.data(), mac_input.size());
-    }
+    secure_zero(mac_input.data(), mac_input.size());
     secure_zero(otk, sizeof(otk));
     secure_zero(expected_tag, sizeof(expected_tag));
 

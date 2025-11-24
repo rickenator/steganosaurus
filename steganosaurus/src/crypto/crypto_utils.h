@@ -11,7 +11,6 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include <stdexcept>
 
 // ============================ Platform Detection ============================
 #if defined(_WIN32) || defined(_WIN64)
