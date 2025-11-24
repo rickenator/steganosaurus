@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <cerrno>
 #include <array>
 #include <vector>
 #include <string>
@@ -102,7 +103,11 @@ inline bool get_random_bytes(uint8_t* buf, size_t len) {
     while (remaining > 0) {
         ssize_t result = getrandom(ptr, remaining, 0);
         if (result < 0) {
-            // Fallback to /dev/urandom on error
+            // Retry on EINTR or EAGAIN
+            if (errno == EINTR || errno == EAGAIN) {
+                continue;
+            }
+            // Fallback to /dev/urandom on other errors
             break;
         }
         remaining -= static_cast<size_t>(result);
@@ -115,6 +120,8 @@ inline bool get_random_bytes(uint8_t* buf, size_t len) {
     while (remaining > 0) {
         ssize_t result = read(fd, ptr, remaining);
         if (result <= 0) {
+            // Retry on EINTR
+            if (result < 0 && errno == EINTR) continue;
             close(fd);
             return false;
         }
@@ -239,18 +246,29 @@ inline std::array<uint8_t, 32> sha256(const std::string& s) {
 }
 
 /**
+ * Convert bytes to hexadecimal string.
+ */
+inline std::string to_hex(const uint8_t* data, size_t len) {
+    static const char hex[] = "0123456789abcdef";
+    std::string result;
+    result.reserve(len * 2);
+    for (size_t i = 0; i < len; i++) {
+        result.push_back(hex[data[i] >> 4]);
+        result.push_back(hex[data[i] & 0x0F]);
+    }
+    return result;
+}
+
+inline std::string to_hex(const std::vector<uint8_t>& data) {
+    return to_hex(data.data(), data.size());
+}
+
+/**
  * Convert SHA-256 hash to hexadecimal string.
  */
 inline std::string sha256_hex(const uint8_t* data, size_t len) {
     auto hash = sha256(data, len);
-    static const char hex[] = "0123456789abcdef";
-    std::string result;
-    result.reserve(64);
-    for (uint8_t b : hash) {
-        result.push_back(hex[b >> 4]);
-        result.push_back(hex[b & 0x0F]);
-    }
-    return result;
+    return to_hex(hash.data(), hash.size());
 }
 
 inline std::string sha256_hex(const std::string& s) {

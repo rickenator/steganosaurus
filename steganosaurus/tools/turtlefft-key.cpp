@@ -157,18 +157,6 @@ bool unwrap_key(const std::vector<uint8_t>& wrapped, const std::string& passphra
     return success;
 }
 
-// Convert bytes to hex string
-std::string to_hex(const uint8_t* data, size_t len) {
-    static const char hex[] = "0123456789abcdef";
-    std::string result;
-    result.reserve(len * 2);
-    for (size_t i = 0; i < len; i++) {
-        result.push_back(hex[data[i] >> 4]);
-        result.push_back(hex[data[i] & 0x0F]);
-    }
-    return result;
-}
-
 // Write binary data to file
 bool write_file(const std::string& path, const uint8_t* data, size_t len) {
     std::ofstream out(path, std::ios::binary);
@@ -296,7 +284,7 @@ int main(int argc, char* argv[]) {
             } else {
                 // Output to stdout
                 if (output_hex) {
-                    std::cout << to_hex(key.data(), key.size()) << "\n";
+                    std::cout << crypto_utils::to_hex(key.data(), key.size()) << "\n";
                 } else {
                     std::cout << crypto_utils::base64_encode(key.data(), key.size()) << "\n";
                 }
@@ -337,7 +325,7 @@ int main(int argc, char* argv[]) {
         } else {
             // Output to stdout
             if (output_hex) {
-                std::cout << to_hex(key.data(), key.size()) << "\n";
+                std::cout << crypto_utils::to_hex(key.data(), key.size()) << "\n";
             } else {
                 std::cout << crypto_utils::base64_encode(key.data(), key.size()) << "\n";
             }
@@ -376,7 +364,7 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        std::cout << to_hex(key.data(), key.size()) << "\n";
+        std::cout << crypto_utils::to_hex(key.data(), key.size()) << "\n";
         crypto_utils::secure_zero(key.data(), key.size());
         
     } else {

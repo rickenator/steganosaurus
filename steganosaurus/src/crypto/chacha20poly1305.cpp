@@ -288,8 +288,8 @@ bool aead_chacha20_poly1305_decrypt(
     }
     
     if (!valid) {
-        // Zero output on authentication failure
-        std::memset(pt_out, 0, ct_len);
+        // Zero output on authentication failure using secure_zero
+        crypto_utils::secure_zero(pt_out, ct_len);
         return false;
     }
     
