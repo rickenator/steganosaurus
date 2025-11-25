@@ -373,7 +373,7 @@ static inline pair<int,int> conj_idx(int y,int x,int H,int W){
 static inline double hypot_idx(int y,int x){ return hypot((double)y,(double)x); }
 
 struct Params {
-    double alpha = 0.40, rmin = 0.05, rmax = 0.45, magmin = 0.01, density=0.7, jitter=0.01;
+    double alpha = 0.50, rmin = 0.05, rmax = 0.45, magmin = 0.01, density=0.7, jitter=0.0;
     bool center=false;
     uint32_t pbkdf2_iter = 600000; // Increased from 200k to 600k for >100ms key derivation
     bool adaptive_alpha = false; // Adaptive phase shift (experimental - needs refinement for reliable decoding)
@@ -469,6 +469,40 @@ static vector<uint8_t> rep3_decode_bits(const vector<uint8_t>& bits, bool &ok){
     ok = true; vector<uint8_t> out; if(bits.size()%3!=0) ok = false;
     for(size_t i=0;i+2<bits.size(); i+=3){
         int s = bits[i] + bits[i+1] + bits[i+2]; out.push_back((s>=2)?1:0);
+    }
+    return out;
+}
+
+// Repetition-5 for payload (majority decode, tolerates 40% error rate)
+static vector<uint8_t> rep5_encode_bits(const vector<uint8_t>& bits){
+    vector<uint8_t> out; out.reserve(bits.size()*5);
+    for(uint8_t b: bits){ 
+        out.push_back(b); out.push_back(b); out.push_back(b); out.push_back(b); out.push_back(b);
+    }
+    return out;
+}
+static vector<uint8_t> rep5_decode_bits(const vector<uint8_t>& bits, bool &ok){
+    ok = true; vector<uint8_t> out; if(bits.size()%5!=0) ok = false;
+    for(size_t i=0;i+4<bits.size(); i+=5){
+        int s = bits[i] + bits[i+1] + bits[i+2] + bits[i+3] + bits[i+4]; 
+        out.push_back((s>=3)?1:0);
+    }
+    return out;
+}
+
+// Repetition-7 for payload (majority decode, tolerates ~43% error rate)
+static vector<uint8_t> rep7_encode_bits(const vector<uint8_t>& bits){
+    vector<uint8_t> out; out.reserve(bits.size()*7);
+    for(uint8_t b: bits){ 
+        for(int i=0;i<7;i++) out.push_back(b);
+    }
+    return out;
+}
+static vector<uint8_t> rep7_decode_bits(const vector<uint8_t>& bits, bool &ok){
+    ok = true; vector<uint8_t> out; if(bits.size()%7!=0) ok = false;
+    for(size_t i=0;i+6<bits.size(); i+=7){
+        int s = bits[i] + bits[i+1] + bits[i+2] + bits[i+3] + bits[i+4] + bits[i+5] + bits[i+6]; 
+        out.push_back((s>=4)?1:0);
     }
     return out;
 }
@@ -760,7 +794,9 @@ struct Turtle {
             if((y==0&&x==0)) continue;
             if(visited[plane][y][x]) continue;
             if(!annulus_ok(y,x)) continue;
-            if(!mag_ok(plane,y,x)) continue;
+            // Skip magnitude check - it causes embed/extract mismatch since magnitudes 
+            // change during FFT round-trip. Use only position-based bin selection.
+            // if(!mag_ok(plane,y,x)) continue;
             auto [cy,cx]=conj_idx(y,x,H,W);
             if(visited[plane][cy][cx]) continue;
             return;
@@ -946,17 +982,17 @@ static void do_embed(const Args& A){
 
     // ECC-protected frame:
     // - Header: Repetition-3 of header bits
-    // - Payload (ciphertext||tag): Hamming(7,4) over payload bits
+    // - Payload (ciphertext||tag): Repetition-7 for reliable extraction (tolerates ~43% error rate per bit)
     vector<uint8_t> header_bits = bits_from_bytes(header_bytes);
     auto header_rep3 = rep3_encode_bits(header_bits);
     vector<uint8_t> payload_bytes; payload_bytes.reserve(ct.size()+16);
     payload_bytes.insert(payload_bytes.end(), ct.begin(), ct.end()); payload_bytes.insert(payload_bytes.end(), tag.begin(), tag.end());
     auto payload_bits = bits_from_bytes(payload_bytes);
-    auto payload_ham = ham74_encode_bits(payload_bits);
+    auto payload_rep7 = rep7_encode_bits(payload_bits);
     // final bitstream to embed
-    vector<uint8_t> bits; bits.reserve(header_rep3.size() + payload_ham.size());
+    vector<uint8_t> bits; bits.reserve(header_rep3.size() + payload_rep7.size());
     bits.insert(bits.end(), header_rep3.begin(), header_rep3.end());
-    bits.insert(bits.end(), payload_ham.begin(), payload_ham.end());
+    bits.insert(bits.end(), payload_rep7.begin(), payload_rep7.end());
 
     // capacity estimate (unique pairs, excluding axes/DC)
     size_t usable=0;
@@ -1220,14 +1256,15 @@ static void do_extract(const Args& A){
     fprintf(stderr,"[DEBUG] Parsed header: clen=%u\n", Hdr.clen);
     #endif
 
-    // Now read Hamming(7,4)-encoded ciphertext + tag
+    // Now read Repetition-5 encoded ciphertext + tag
     size_t rest_bytes = (size_t)Hdr.clen + 16;
     size_t payload_bits_len = rest_bytes * 8;
-    size_t ham_blocks = (payload_bits_len + 3) / 4; // number of 4-bit blocks
-    size_t ham_encoded_bits = ham_blocks * 7;
-    vector<uint8_t> ham_bits; ham_bits.reserve(ham_encoded_bits);
-    for(size_t i=0;i<ham_encoded_bits;i++) ham_bits.push_back(read_next_bit(A.P.alpha));
-    auto payload_bits = ham74_decode_bits(ham_bits, payload_bits_len);
+    size_t rep7_encoded_bits = payload_bits_len * 7;
+    vector<uint8_t> rep7_bits; rep7_bits.reserve(rep7_encoded_bits);
+    for(size_t i=0;i<rep7_encoded_bits;i++) rep7_bits.push_back(read_next_bit(A.P.alpha));
+    bool rep7_ok = true;
+    auto payload_bits = rep7_decode_bits(rep7_bits, rep7_ok);
+    if(!rep7_ok){ fprintf(stderr,"Payload rep7 decode failed.\n"); exit(1); }
     auto rest = bytes_from_bits(payload_bits);
     if(rest.size() < rest_bytes){ fprintf(stderr,"Payload truncated after ECC decode.\n"); exit(1); }
     vector<uint8_t> ct(rest.begin(), rest.begin()+Hdr.clen);
