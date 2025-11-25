@@ -565,6 +565,7 @@ static const char WRAPPED_KEY_MAGIC[4] = {'T', 'F', 'K', 'W'}; // TurtleFFT Key 
 static bool decode_or_unwrap_key(const string& key_data, const string& unwrap_pass, 
                                   uint32_t pbkdf2_iter, array<uint8_t, 32>& key_out) {
     vector<uint8_t> decoded = crypto_utils::base64_decode(key_data);
+    // Return false if decode failed (empty result) on non-empty input
     if(decoded.empty() && !key_data.empty()){
         return false;
     }
