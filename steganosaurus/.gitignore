@@ -1,7 +1,10 @@
 build/
+_codeql_build_dir/
 *.o
 *.d
+*.a
 turtlefft
+turtlefft-key
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
