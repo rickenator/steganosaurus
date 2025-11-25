@@ -250,7 +250,7 @@ static void poly1305_mac(uint8_t tag[16], const uint8_t* msg, size_t mlen, const
     h1 = (h1 & ~mask) | (g1 & mask);
     h2 = (h2 & ~mask) | (g2 & mask);
     h3 = (h3 & ~mask) | (g3 & mask);
-    h4 = (h4 & ~mask) | (g4 & mask) + (1ull<<26);
+    h4 = ((h4 & ~mask) | (g4 & mask)) + (1ull<<26);
 
     // s part
     uint64_t s0 = load32_le(&key[16]);
@@ -373,7 +373,7 @@ static inline pair<int,int> conj_idx(int y,int x,int H,int W){
 static inline double hypot_idx(int y,int x){ return hypot((double)y,(double)x); }
 
 struct Params {
-    double alpha = 0.22, rmin = 0.05, rmax = 0.45, magmin = 0.01, density=0.7, jitter=0.05;
+    double alpha = 0.40, rmin = 0.05, rmax = 0.45, magmin = 0.01, density=0.7, jitter=0.01;
     bool center=false;
     uint32_t pbkdf2_iter = 600000; // Increased from 200k to 600k for >100ms key derivation
     bool adaptive_alpha = false; // Adaptive phase shift (experimental - needs refinement for reliable decoding)
