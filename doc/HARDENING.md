@@ -4,14 +4,175 @@ This document describes the security hardening improvements implemented to trans
 
 ## Overview
 
-The hardening effort focused on three key areas:
-1. **Security**: Strengthening key derivation and preventing timing attacks
-2. **Robustness**: Improving error tolerance and embedding adaptivity
-3. **Stealth**: Reducing detectability through advanced embedding techniques
+The hardening effort focused on four key areas:
+1. **Key Management**: Secure key generation, wrapping, and storage
+2. **Security**: Strengthening key derivation and preventing timing attacks
+3. **Robustness**: Improving error tolerance and embedding adaptivity
+4. **Stealth**: Reducing detectability through advanced embedding techniques
 
 ## Implemented Features
 
-### 1. Enhanced Key Derivation Function (KDF)
+### 1. Key Generation & Export
+
+**Status**: ✅ Implemented and Tested
+
+The `turtlefft-key` utility provides secure key generation, passphrase-based wrapping, and key management for TurtleFFT. This enables users to generate and store encryption keys safely.
+
+#### CLI Tool: `turtlefft-key`
+
+**Build**:
+```bash
+cd steganosaurus/build
+cmake ..
+cmake --build .
+# Produces: ./turtlefft-key
+```
+
+**Usage**:
+```bash
+turtlefft-key --gen-key [--key-out <file>]
+turtlefft-key --wrap --key-in <file> --key-out <file> --pass <passphrase>
+turtlefft-key --unwrap --key-in <file> --pass <passphrase>
+turtlefft-key --help
+```
+
+#### Key Generation
+
+Generate a new 256-bit (32-byte) master key using the OS cryptographically-secure random number generator (CSPRNG):
+
+```bash
+# Generate and print to stdout
+./turtlefft-key --gen-key
+# Output:
+#   Key (base64): <44-character base64 string>
+#   Fingerprint:  <first 12 hex chars of SHA256(key)>
+
+# Generate and save to file (plaintext base64)
+./turtlefft-key --gen-key --key-out master.key
+```
+
+**Security Properties**:
+- Uses OS CSPRNG: `BCryptGenRandom` (Windows), `getrandom` (Linux), `arc4random_buf` (macOS/BSD)
+- Falls back to `/dev/urandom` on POSIX systems if syscalls unavailable
+- 256-bit key provides 128-bit security against brute-force attacks
+
+#### Key Wrapping (Passphrase Protection)
+
+Wrap (encrypt) a plaintext key file with a passphrase for secure storage:
+
+```bash
+# Wrap a key with passphrase
+./turtlefft-key --wrap --key-in master.key --key-out master.wrapped --pass "my secure passphrase"
+```
+
+**Wrapping Process**:
+1. Generate random 16-byte salt and 12-byte nonce using CSPRNG
+2. Derive wrapping key: `PBKDF2-HMAC-SHA256(passphrase, salt, iterations)`
+3. Encrypt: `ChaCha20-Poly1305(wrapping_key, nonce, salt_as_AAD, master_key)`
+4. Output: `TFFTKEY1 || salt(16) || nonce(12) || ciphertext(32) || tag(16)` encoded as base64
+
+**Wrapped Key Format** (84 bytes total, stored as 112-char base64):
+| Field | Size | Description |
+|-------|------|-------------|
+| Magic | 8 bytes | `TFFTKEY1` identifier |
+| Salt | 16 bytes | Random salt for PBKDF2 |
+| Nonce | 12 bytes | Random nonce for ChaCha20-Poly1305 |
+| Ciphertext | 32 bytes | Encrypted master key |
+| Tag | 16 bytes | Poly1305 authentication tag |
+
+#### Key Unwrapping
+
+Decrypt a wrapped key file to retrieve the original master key:
+
+```bash
+# Unwrap and print key
+./turtlefft-key --unwrap --key-in master.wrapped --pass "my secure passphrase"
+
+# Unwrap and save to plaintext file
+./turtlefft-key --unwrap --key-in master.wrapped --pass "my secure passphrase" --key-out master-decrypted.key
+```
+
+**Error Handling**:
+- Wrong passphrase: "Decryption failed (wrong passphrase or corrupted file)"
+- Invalid format: "Invalid wrapped key file (bad magic)"
+- Tampered data: ChaCha20-Poly1305 authentication fails
+
+#### PBKDF2 Iteration Count
+
+Control the computational cost of passphrase-based key derivation:
+
+```bash
+# Default: 100,000 iterations
+./turtlefft-key --wrap --key-in master.key --key-out master.wrapped --pass "passphrase"
+
+# Higher security: 1,000,000 iterations (~10x slower)
+./turtlefft-key --wrap --key-in master.key --key-out master.wrapped --pass "passphrase" --pbkdf2-iters 1000000
+
+# Faster for testing: 10,000 iterations (NOT recommended for production)
+./turtlefft-key --wrap --key-in master.key --key-out master.wrapped --pass "passphrase" --pbkdf2-iters 10000
+```
+
+**Iteration Bounds**: 1,000 minimum, 10,000,000 maximum
+
+**Timing Reference** (modern CPU):
+| Iterations | Approximate Time |
+|------------|------------------|
+| 10,000 | ~100ms |
+| 100,000 | ~1 second |
+| 1,000,000 | ~10 seconds |
+
+#### Complete Workflow Example
+
+```bash
+# 1. Generate a new master key
+./turtlefft-key --gen-key --key-out master.key
+# Key saved to: master.key
+# Fingerprint:  a1b2c3d4e5f6  (example - yours will differ)
+
+# 2. Wrap it with a strong passphrase for secure storage
+./turtlefft-key --wrap --key-in master.key --key-out master.wrapped --pass "correct-horse-battery-staple"
+# Wrapped key saved to: master.wrapped
+# Original fingerprint: a1b2c3d4e5f6  (same key = same fingerprint)
+
+# 3. Delete the plaintext key (keep only wrapped version)
+rm master.key
+
+# 4. Later: Unwrap to retrieve the key
+./turtlefft-key --unwrap --key-in master.wrapped --pass "correct-horse-battery-staple"
+# Key (base64): <base64 key>
+# Fingerprint:  a1b2c3d4e5f6  (matches original - key recovered correctly)
+
+# 5. Use with turtlefft (future integration - illustrative example)
+# KEY=$(./turtlefft-key --unwrap --key-in master.wrapped --pass "..." 2>/dev/null | grep "Key (base64)" | cut -d' ' -f3)
+# ./turtlefft embed --key "$KEY" --in cover.png --out stego.png --secret "message" --pass "passphrase"
+```
+
+#### Security Considerations
+
+**CSPRNG Requirements**:
+- The tool will fail if OS CSPRNG is unavailable
+- Never use `rand()` or other weak PRNGs for cryptographic keys
+
+**Passphrase Strength**:
+- Use strong, unique passphrases (20+ characters recommended)
+- Consider a password manager for generation and storage
+- Weak passphrases can be brute-forced despite PBKDF2 iterations
+
+**Plaintext Key Files**:
+- Plaintext key files (`--gen-key --key-out`) should be treated as secrets
+- Use wrapped keys for any long-term storage
+- Delete plaintext keys after wrapping
+
+**Memory Security**:
+- Sensitive buffers (keys, passphrases) are zeroed after use via `secure_zero()`
+- Uses `volatile` writes to prevent compiler optimization
+
+**Fingerprint Purpose**:
+- Fingerprint = first 12 hex characters of SHA256(key)
+- Used for verification only—never reveals the key
+- Safe to log, display, or share for key identification
+
+### 2. Enhanced Key Derivation Function (KDF)
 
 **Status**: ✅ Implemented and Tested
 
@@ -39,7 +200,7 @@ The hardening effort focused on three key areas:
 - Extract time: ~6 seconds (primarily KDF)
 - Additional overhead: Negligible compared to KDF time
 
-### 2. Constant-Time MAC Verification
+### 3. Constant-Time MAC Verification
 
 **Status**: ✅ Implemented and Tested
 
@@ -62,7 +223,7 @@ for(int i = 0; i < 16; i++){
 bool tags_match = (diff == 0);
 ```
 
-### 3. Adaptive Phase Shift (Experimental)
+### 4. Adaptive Phase Shift (Experimental)
 
 **Status**: ⚠️ Experimental - Needs Refinement
 
@@ -86,7 +247,7 @@ bool tags_match = (diff == 0);
 ./turtlefft embed --in cover.png --out stego.png --secret "message" --pass "password" --adaptive_alpha 1
 ```
 
-### 4. Cover-Dependent Turtlewalk (Experimental)
+### 5. Cover-Dependent Turtlewalk (Experimental)
 
 **Status**: ⚠️ Experimental - Needs Refinement
 
