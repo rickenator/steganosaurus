@@ -564,8 +564,8 @@ static const char WRAPPED_KEY_MAGIC[4] = {'T', 'F', 'K', 'W'}; // TurtleFFT Key 
 // Helper to decode a key from base64 or unwrap a passphrase-protected key
 static bool decode_or_unwrap_key(const string& key_data, const string& unwrap_pass, 
                                   uint32_t pbkdf2_iter, array<uint8_t, 32>& key_out) {
-    vector<uint8_t> decoded;
-    if(!crypto_utils::base64_decode(key_data, decoded)){
+    vector<uint8_t> decoded = crypto_utils::base64_decode(key_data);
+    if(decoded.empty() && !key_data.empty()){
         return false;
     }
     
@@ -604,7 +604,7 @@ static bool decode_or_unwrap_key(const string& key_data, const string& unwrap_pa
         crypto_utils::secure_zero(derived, sizeof(derived));
         
         // Decrypt
-        if(!chacha20poly1305::aead_chacha20_poly1305_decrypt(
+        if(!aead::aead_chacha20_poly1305_decrypt(
                 wrap_key.data(), nonce.data(),
                 nullptr, 0,
                 ciphertext.data(), ciphertext.size(),
@@ -1277,7 +1277,7 @@ static void do_extract(const Args& A){
 static void do_gen_key(const Args& A){
     // Generate 32-byte master key using OS CSPRNG
     array<uint8_t, 32> master_key{};
-    if(!crypto_utils::get_random_bytes(master_key)){
+    if(!crypto_utils::get_random_bytes(master_key.data(), master_key.size())){
         fprintf(stderr,"Failed to generate random key (CSPRNG error)\n"); exit(1);
     }
     
@@ -1300,7 +1300,7 @@ static void do_gen_key(const Args& A){
             // Wrap key with passphrase using ChaCha20-Poly1305
             // Derive wrapping key from passphrase using PBKDF2
             array<uint8_t, 16> salt{};
-            if(!crypto_utils::get_random_bytes(salt)){
+            if(!crypto_utils::get_random_bytes(salt.data(), salt.size())){
                 fprintf(stderr,"Failed to generate salt\n"); exit(1);
             }
             
@@ -1322,7 +1322,7 @@ static void do_gen_key(const Args& A){
             // Encrypt master key
             array<uint8_t, 32> ciphertext;
             array<uint8_t, 16> tag;
-            if(!chacha20poly1305::aead_chacha20_poly1305_encrypt(
+            if(!aead::aead_chacha20_poly1305_encrypt(
                     wrap_key.data(), nonce.data(),
                     nullptr, 0, // No AAD
                     master_key.data(), master_key.size(),
