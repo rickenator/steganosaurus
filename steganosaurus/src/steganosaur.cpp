@@ -483,8 +483,8 @@ static vector<uint8_t> rep5_encode_bits(const vector<uint8_t>& bits){
 }
 static vector<uint8_t> rep5_decode_bits(const vector<uint8_t>& bits, bool &ok){
     ok = true; vector<uint8_t> out; if(bits.size()%5!=0) ok = false;
-    for(size_t i=0;i+4<bits.size(); i+=5){
-        int s = bits[i] + bits[i+1] + bits[i+2] + bits[i+3] + bits[i+4]; 
+    for(size_t i=0; i+5<=bits.size(); i+=5){
+        int s = 0; for(int j=0;j<5;j++) s += bits[i+j];
         out.push_back((s>=3)?1:0);
     }
     return out;
@@ -500,8 +500,8 @@ static vector<uint8_t> rep7_encode_bits(const vector<uint8_t>& bits){
 }
 static vector<uint8_t> rep7_decode_bits(const vector<uint8_t>& bits, bool &ok){
     ok = true; vector<uint8_t> out; if(bits.size()%7!=0) ok = false;
-    for(size_t i=0;i+6<bits.size(); i+=7){
-        int s = bits[i] + bits[i+1] + bits[i+2] + bits[i+3] + bits[i+4] + bits[i+5] + bits[i+6]; 
+    for(size_t i=0; i+7<=bits.size(); i+=7){
+        int s = 0; for(int j=0;j<7;j++) s += bits[i+j];
         out.push_back((s>=4)?1:0);
     }
     return out;
@@ -1256,7 +1256,7 @@ static void do_extract(const Args& A){
     fprintf(stderr,"[DEBUG] Parsed header: clen=%u\n", Hdr.clen);
     #endif
 
-    // Now read Repetition-5 encoded ciphertext + tag
+    // Now read Repetition-7 encoded ciphertext + tag
     size_t rest_bytes = (size_t)Hdr.clen + 16;
     size_t payload_bits_len = rest_bytes * 8;
     size_t rep7_encoded_bits = payload_bits_len * 7;
