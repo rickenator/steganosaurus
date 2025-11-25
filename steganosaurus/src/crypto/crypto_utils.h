@@ -548,6 +548,15 @@ inline bool constant_time_compare(const uint8_t* a, const uint8_t* b, size_t len
     return diff == 0;
 }
 
+/**
+ * Compute key fingerprint (first 8 bytes of SHA-256 hash as hex).
+ */
+template<size_t N>
+inline std::string key_fingerprint(const std::array<uint8_t, N>& key) {
+    auto hash = sha256(key.data(), key.size());
+    return to_hex(hash.data(), 8);
+}
+
 } // namespace crypto_utils
 
 #endif // CRYPTO_UTILS_H
