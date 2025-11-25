@@ -456,7 +456,7 @@ Note: The magic check optimization still leaks timing (fails fast), but this onl
 ✅ **100% Reliability Test**:
 ```bash
 # Verified 150+ consecutive embed/extract cycles with 0 failures
-# Both short (12-byte) and long (54+ byte) messages tested
+# Both short (12-byte) and long (54-byte) messages tested
 # All extractions successful regardless of random salt
 ```
 
@@ -466,7 +466,7 @@ Note: The magic check optimization still leaks timing (fails fast), but this onl
 |-----------|------------|--------------|---------------|
 | "Hello World!" (12 bytes) | 6.0s | 5.9s | 2480 bits (with Rep-7) |
 | Long message (54 bytes) | 6.0s | 5.9s | 4832 bits (with Rep-7) |
-| Short (4 bytes) | 6.0s | 5.9s | ~2000 bits (with Rep-7) |
+| Short message (4 bytes) | 6.0s | 5.9s | 1752 bits (with Rep-7) |
 
 **Note**: Embedded bits increased due to Repetition-7 encoding (7x expansion for payload).
 

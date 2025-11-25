@@ -94,7 +94,6 @@ If the passphrase is wrong, output will fail cleanly.
 | `jitter` | 0.0 | Phase jitter disabled for deterministic embedding |
 | `density` | 0.7 | Probability a valid bin is used |
 | `rmin/rmax` | 0.05 / 0.45 | Radial region of FFT to embed in |
-| `magmin` | 0.01 | Minimum magnitude (legacy, not used in bin selection) |
 | `center` | 0 | FFT center-shift toggle |
 | `pbkdf2_iter` | 600000 | Passphrase strengthening iterations (hardened) |
 | `adaptive_alpha` | 0 | Adaptive phase shift (experimental) |
