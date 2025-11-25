@@ -1,450 +1,376 @@
-// turtlefft-key.cpp - CLI tool for key generation, wrapping, and export
-// Demonstrates generate/wrap/unpack flows for TurtleFFT
-// Copyright (c) 2024 TurtleFFT Project. Apache License 2.0.
+// turtlefft-key.cpp
+// Secure key generation and optional passphrase-wrapped key export tool for TurtleFFT
+// Usage:
+//   turtlefft-key --gen-key [--key-out FILE] [--wrap PASSPHRASE]
+//   turtlefft-key --unwrap FILE --pass PASSPHRASE [--key-out FILE]
+//   turtlefft-key --export-hex FILE [--pass PASSPHRASE]
+//
+// Default wrapping: PBKDF2-HMAC-SHA256 (16-byte salt, 200000 iterations) + ChaCha20-Poly1305 (12-byte nonce)
+
+#include "../src/crypto/crypto_utils.h"
+#include "../src/crypto/chacha20poly1305.h"
 
 #include <iostream>
 #include <fstream>
 #include <string>
 #include <cstring>
-#include <vector>
 #include <array>
+#include <vector>
 
-#include "../src/crypto/crypto_utils.h"
-#include "../src/crypto/chacha20poly1305.h"
+// Configuration constants
+constexpr size_t KEY_SIZE = 32;           // 256-bit key
+constexpr size_t SALT_SIZE = 16;          // 16-byte salt for PBKDF2
+constexpr size_t NONCE_SIZE = 12;         // 12-byte nonce for ChaCha20-Poly1305
+constexpr size_t TAG_SIZE = 16;           // 16-byte Poly1305 tag
+constexpr uint32_t PBKDF2_ITERATIONS = 200000;  // Conservative PBKDF2 iteration count
+
+// Wrapped key format: MAGIC(4) || VERSION(1) || SALT(16) || NONCE(12) || CIPHERTEXT(32) || TAG(16)
+constexpr size_t WRAPPED_KEY_SIZE = 4 + 1 + SALT_SIZE + NONCE_SIZE + KEY_SIZE + TAG_SIZE;
+constexpr uint8_t MAGIC[4] = {'T', 'F', 'K', 'W'};  // TurtleFFT Key Wrapped
+constexpr uint8_t VERSION = 1;
 
 namespace {
 
-constexpr size_t KEY_SIZE = 32;
-constexpr size_t SALT_SIZE = 16;
-constexpr size_t NONCE_SIZE = 12;
-constexpr size_t TAG_SIZE = 16;
-constexpr uint32_t DEFAULT_PBKDF2_ITERS = 100000;
-
-// File format magic for wrapped keys
-constexpr char WRAPPED_KEY_MAGIC[] = "TFFTKEY1";
-constexpr size_t MAGIC_SIZE = 8;
-
-struct Args {
-    bool gen_key = false;
-    bool wrap = false;
-    bool unwrap = false;
-    std::string key_out;
-    std::string key_in;
-    std::string passphrase;
-    uint32_t pbkdf2_iters = DEFAULT_PBKDF2_ITERS;
-    bool help = false;
-};
-
 void print_usage() {
-    std::cerr << R"(
-turtlefft-key - Key generation and management for TurtleFFT
-
-USAGE:
-  turtlefft-key --gen-key [--key-out <file>]
-  turtlefft-key --wrap --key-in <file> --key-out <file> --pass <passphrase>
-  turtlefft-key --unwrap --key-in <file> --pass <passphrase>
-  turtlefft-key --help
-
-OPTIONS:
-  --gen-key           Generate a new 256-bit (32-byte) master key
-  --key-out <file>    Output file for key (default: stdout)
-  --key-in <file>     Input key file
-  --wrap              Wrap (encrypt) a key with a passphrase
-  --unwrap            Unwrap (decrypt) a wrapped key file
-  --pass <passphrase> Passphrase for key wrapping/unwrapping
-  --pbkdf2-iters <n>  PBKDF2 iterations (default: 100000)
-  --help              Show this help message
-
-EXAMPLES:
-  # Generate a new key and print to stdout
-  turtlefft-key --gen-key
-
-  # Generate a key and save to file
-  turtlefft-key --gen-key --key-out master.key
-
-  # Wrap a key with a passphrase
-  turtlefft-key --wrap --key-in master.key --key-out master.wrapped --pass "my passphrase"
-
-  # Unwrap a key
-  turtlefft-key --unwrap --key-in master.wrapped --pass "my passphrase"
-
-OUTPUT FORMAT:
-  --gen-key outputs:
-    Key (base64): <base64-encoded 32-byte key>
-    Fingerprint:  <first 12 chars of SHA256 hex>
-)" << std::endl;
+    std::cerr << "turtlefft-key: Secure key generation and management for TurtleFFT\n\n"
+              << "Usage:\n"
+              << "  turtlefft-key --gen-key [OPTIONS]\n"
+              << "    Generate a new 256-bit key\n"
+              << "    Options:\n"
+              << "      --key-out FILE    Write key to FILE (default: stdout as base64)\n"
+              << "      --wrap PASSPHRASE Wrap key with passphrase before output\n"
+              << "      --hex             Output raw key as hex (only without --wrap)\n\n"
+              << "  turtlefft-key --unwrap FILE --pass PASSPHRASE [OPTIONS]\n"
+              << "    Unwrap a passphrase-protected key\n"
+              << "    Options:\n"
+              << "      --key-out FILE    Write unwrapped key to FILE (default: stdout as base64)\n"
+              << "      --hex             Output as hex instead of base64\n\n"
+              << "  turtlefft-key --export-hex FILE [--pass PASSPHRASE]\n"
+              << "    Export key from FILE as hex\n"
+              << "    Use --pass if the key is wrapped\n\n"
+              << "Wrapped key format uses:\n"
+              << "  - PBKDF2-HMAC-SHA256 with 16-byte salt and 200000 iterations\n"
+              << "  - ChaCha20-Poly1305 AEAD with 12-byte nonce\n";
 }
 
-bool parse_args(int argc, char* argv[], Args& args) {
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        
-        if (arg == "--gen-key") {
-            args.gen_key = true;
-        } else if (arg == "--wrap") {
-            args.wrap = true;
-        } else if (arg == "--unwrap") {
-            args.unwrap = true;
-        } else if (arg == "--key-out") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: --key-out requires an argument" << std::endl;
-                return false;
-            }
-            args.key_out = argv[++i];
-        } else if (arg == "--key-in") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: --key-in requires an argument" << std::endl;
-                return false;
-            }
-            args.key_in = argv[++i];
-        } else if (arg == "--pass") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: --pass requires an argument" << std::endl;
-                return false;
-            }
-            args.passphrase = argv[++i];
-        } else if (arg == "--pbkdf2-iters") {
-            if (i + 1 >= argc) {
-                std::cerr << "Error: --pbkdf2-iters requires an argument" << std::endl;
-                return false;
-            }
-            unsigned long val = std::stoul(argv[++i]);
-            // Validate iteration count bounds
-            constexpr unsigned long MIN_ITERS = 1000;
-            constexpr unsigned long MAX_ITERS = 10000000;
-            if (val < MIN_ITERS || val > MAX_ITERS) {
-                std::cerr << "Error: --pbkdf2-iters must be between " << MIN_ITERS << " and " << MAX_ITERS << std::endl;
-                return false;
-            }
-            args.pbkdf2_iters = static_cast<uint32_t>(val);
-        } else if (arg == "--help" || arg == "-h") {
-            args.help = true;
-        } else {
-            std::cerr << "Error: Unknown argument: " << arg << std::endl;
-            return false;
-        }
-    }
-    
-    return true;
-}
-
-/**
- * Generate a fingerprint from a key (first 12 hex chars of SHA256).
- */
-std::string key_fingerprint(const std::array<uint8_t, KEY_SIZE>& key) {
-    auto hash = crypto::sha256::hash(key.data(), key.size());
-    std::string hex = crypto::sha256_hex(hash);
-    return hex.substr(0, 12);
-}
-
-/**
- * Generate a new 256-bit master key.
- */
-bool do_gen_key(const Args& args) {
-    std::array<uint8_t, KEY_SIZE> key{};
-    
-    if (!crypto::get_random_bytes(key.data(), key.size())) {
-        std::cerr << "Error: Failed to generate random bytes" << std::endl;
-        return false;
-    }
-    
-    std::string b64 = crypto::base64::encode(key.data(), key.size());
-    std::string fingerprint = key_fingerprint(key);
-    
-    if (args.key_out.empty()) {
-        // Print to stdout
-        std::cout << "Key (base64): " << b64 << std::endl;
-        std::cout << "Fingerprint:  " << fingerprint << std::endl;
-    } else {
-        // Write to file (base64 format)
-        std::ofstream out(args.key_out);
-        if (!out) {
-            std::cerr << "Error: Cannot open output file: " << args.key_out << std::endl;
-            crypto::secure_zero(key.data(), key.size());
-            return false;
-        }
-        out << b64 << std::endl;
-        out.close();
-        
-        std::cout << "Key saved to: " << args.key_out << std::endl;
-        std::cout << "Fingerprint:  " << fingerprint << std::endl;
-    }
-    
-    crypto::secure_zero(key.data(), key.size());
-    return true;
-}
-
-/**
- * Read a key from file (base64 format).
- */
-bool read_key_file(const std::string& path, std::array<uint8_t, KEY_SIZE>& key) {
-    std::ifstream in(path);
-    if (!in) {
-        std::cerr << "Error: Cannot open key file: " << path << std::endl;
-        return false;
-    }
-    
-    std::string line;
-    std::getline(in, line);
-    in.close();
-    
-    // Trim whitespace
-    while (!line.empty() && (line.back() == '\n' || line.back() == '\r' || line.back() == ' ')) {
-        line.pop_back();
-    }
-    
-    std::vector<uint8_t> decoded;
-    if (!crypto::base64::decode(line, decoded)) {
-        std::cerr << "Error: Invalid base64 in key file" << std::endl;
-        return false;
-    }
-    
-    if (decoded.size() != KEY_SIZE) {
-        std::cerr << "Error: Key file has wrong size (expected " << KEY_SIZE << " bytes, got " << decoded.size() << ")" << std::endl;
-        return false;
-    }
-    
-    std::memcpy(key.data(), decoded.data(), KEY_SIZE);
-    crypto::secure_zero(decoded.data(), decoded.size());
-    return true;
-}
-
-/**
- * Wrap (encrypt) a key with a passphrase.
- * Format: MAGIC (8) || SALT (16) || NONCE (12) || CIPHERTEXT (32) || TAG (16)
- */
-bool do_wrap_key(const Args& args) {
-    if (args.key_in.empty()) {
-        std::cerr << "Error: --key-in is required for --wrap" << std::endl;
-        return false;
-    }
-    if (args.key_out.empty()) {
-        std::cerr << "Error: --key-out is required for --wrap" << std::endl;
-        return false;
-    }
-    if (args.passphrase.empty()) {
-        std::cerr << "Error: --pass is required for --wrap" << std::endl;
-        return false;
-    }
-    
-    // Read the key to wrap
-    std::array<uint8_t, KEY_SIZE> key{};
-    if (!read_key_file(args.key_in, key)) {
-        return false;
-    }
-    
-    // Generate salt and nonce
-    std::array<uint8_t, SALT_SIZE> salt{};
-    std::array<uint8_t, NONCE_SIZE> nonce{};
-    if (!crypto::get_random_bytes(salt.data(), salt.size()) ||
-        !crypto::get_random_bytes(nonce.data(), nonce.size())) {
-        std::cerr << "Error: Failed to generate random bytes" << std::endl;
-        crypto::secure_zero(key.data(), key.size());
-        return false;
-    }
-    
-    // Derive wrapping key from passphrase using PBKDF2
-    std::array<uint8_t, KEY_SIZE> wrapping_key{};
-    crypto::pbkdf2_hmac_sha256(
-        args.passphrase,
-        std::vector<uint8_t>(salt.begin(), salt.end()),
-        args.pbkdf2_iters,
-        wrapping_key.data(),
-        wrapping_key.size()
+// Derive wrapping key from passphrase and salt
+std::array<uint8_t, KEY_SIZE> derive_wrapping_key(const std::string& passphrase,
+                                                    const uint8_t salt[SALT_SIZE]) {
+    std::array<uint8_t, KEY_SIZE> wk{};
+    crypto_utils::pbkdf2_hmac_sha256(
+        reinterpret_cast<const uint8_t*>(passphrase.data()), passphrase.size(),
+        salt, SALT_SIZE,
+        PBKDF2_ITERATIONS,
+        wk.data(), wk.size()
     );
+    return wk;
+}
+
+// Wrap a key with passphrase
+std::vector<uint8_t> wrap_key(const uint8_t key[KEY_SIZE], const std::string& passphrase) {
+    std::vector<uint8_t> wrapped(WRAPPED_KEY_SIZE);
     
-    // Encrypt the key
-    std::array<uint8_t, KEY_SIZE> ciphertext{};
-    std::array<uint8_t, TAG_SIZE> tag{};
+    // Generate random salt and nonce
+    uint8_t salt[SALT_SIZE];
+    uint8_t nonce[NONCE_SIZE];
+    if (!crypto_utils::get_random_bytes(salt, SALT_SIZE) ||
+        !crypto_utils::get_random_bytes(nonce, NONCE_SIZE)) {
+        return {};  // Return empty on CSPRNG failure
+    }
     
-    // Use salt as AAD to bind it to the ciphertext
+    // Derive wrapping key
+    auto wk = derive_wrapping_key(passphrase, salt);
+    
+    // Build header: MAGIC || VERSION || SALT || NONCE
+    size_t offset = 0;
+    std::memcpy(wrapped.data() + offset, MAGIC, 4); offset += 4;
+    wrapped[offset++] = VERSION;
+    std::memcpy(wrapped.data() + offset, salt, SALT_SIZE); offset += SALT_SIZE;
+    std::memcpy(wrapped.data() + offset, nonce, NONCE_SIZE); offset += NONCE_SIZE;
+    
+    // Encrypt key with AEAD (header is AAD)
+    uint8_t* ct_out = wrapped.data() + offset;
+    uint8_t* tag_out = ct_out + KEY_SIZE;
+    
+    // AAD = MAGIC || VERSION || SALT || NONCE
+    const uint8_t* aad = wrapped.data();
+    size_t aad_len = 4 + 1 + SALT_SIZE + NONCE_SIZE;
+    
     if (!aead::aead_chacha20_poly1305_encrypt(
-            wrapping_key.data(),
-            nonce.data(),
-            salt.data(),
-            salt.size(),
-            key.data(),
-            key.size(),
-            ciphertext.data(),
-            tag.data())) {
-        std::cerr << "Error: Encryption failed" << std::endl;
-        crypto::secure_zero(key.data(), key.size());
-        crypto::secure_zero(wrapping_key.data(), wrapping_key.size());
-        return false;
+            wk.data(), nonce,
+            aad, aad_len,
+            key, KEY_SIZE,
+            ct_out, tag_out)) {
+        crypto_utils::secure_zero(wk.data(), wk.size());
+        return {};
     }
     
-    // Build output: MAGIC || SALT || NONCE || CIPHERTEXT || TAG
-    std::vector<uint8_t> output;
-    output.insert(output.end(), WRAPPED_KEY_MAGIC, WRAPPED_KEY_MAGIC + MAGIC_SIZE);
-    output.insert(output.end(), salt.begin(), salt.end());
-    output.insert(output.end(), nonce.begin(), nonce.end());
-    output.insert(output.end(), ciphertext.begin(), ciphertext.end());
-    output.insert(output.end(), tag.begin(), tag.end());
-    
-    // Write to file (base64)
-    std::ofstream out(args.key_out);
-    if (!out) {
-        std::cerr << "Error: Cannot open output file: " << args.key_out << std::endl;
-        crypto::secure_zero(key.data(), key.size());
-        crypto::secure_zero(wrapping_key.data(), wrapping_key.size());
-        return false;
-    }
-    out << crypto::base64::encode(output) << std::endl;
-    out.close();
-    
-    std::cout << "Wrapped key saved to: " << args.key_out << std::endl;
-    std::cout << "Original fingerprint: " << key_fingerprint(key) << std::endl;
-    
-    crypto::secure_zero(key.data(), key.size());
-    crypto::secure_zero(wrapping_key.data(), wrapping_key.size());
-    return true;
+    crypto_utils::secure_zero(wk.data(), wk.size());
+    return wrapped;
 }
 
-/**
- * Unwrap (decrypt) a wrapped key file.
- */
-bool do_unwrap_key(const Args& args) {
-    if (args.key_in.empty()) {
-        std::cerr << "Error: --key-in is required for --unwrap" << std::endl;
-        return false;
-    }
-    if (args.passphrase.empty()) {
-        std::cerr << "Error: --pass is required for --unwrap" << std::endl;
+// Unwrap a key with passphrase
+bool unwrap_key(const std::vector<uint8_t>& wrapped, const std::string& passphrase,
+                uint8_t key_out[KEY_SIZE]) {
+    if (wrapped.size() != WRAPPED_KEY_SIZE) {
+        std::cerr << "Error: Invalid wrapped key size\n";
         return false;
     }
     
-    // Read the wrapped key file
-    std::ifstream in(args.key_in);
-    if (!in) {
-        std::cerr << "Error: Cannot open wrapped key file: " << args.key_in << std::endl;
+    // Verify magic and version
+    if (std::memcmp(wrapped.data(), MAGIC, 4) != 0) {
+        std::cerr << "Error: Invalid wrapped key format (bad magic)\n";
+        return false;
+    }
+    if (wrapped[4] != VERSION) {
+        std::cerr << "Error: Unsupported wrapped key version\n";
         return false;
     }
     
-    std::string line;
-    std::getline(in, line);
-    in.close();
-    
-    // Trim whitespace
-    while (!line.empty() && (line.back() == '\n' || line.back() == '\r' || line.back() == ' ')) {
-        line.pop_back();
-    }
-    
-    std::vector<uint8_t> data;
-    if (!crypto::base64::decode(line, data)) {
-        std::cerr << "Error: Invalid base64 in wrapped key file" << std::endl;
-        return false;
-    }
-    
-    constexpr size_t expected_size = MAGIC_SIZE + SALT_SIZE + NONCE_SIZE + KEY_SIZE + TAG_SIZE;
-    if (data.size() != expected_size) {
-        std::cerr << "Error: Wrapped key file has wrong size" << std::endl;
-        return false;
-    }
-    
-    // Parse the wrapped key
-    if (std::memcmp(data.data(), WRAPPED_KEY_MAGIC, MAGIC_SIZE) != 0) {
-        std::cerr << "Error: Invalid wrapped key file (bad magic)" << std::endl;
-        return false;
-    }
-    
-    const uint8_t* salt = data.data() + MAGIC_SIZE;
+    // Extract salt and nonce
+    const uint8_t* salt = wrapped.data() + 5;
     const uint8_t* nonce = salt + SALT_SIZE;
-    const uint8_t* ciphertext = nonce + NONCE_SIZE;
-    const uint8_t* tag = ciphertext + KEY_SIZE;
+    const uint8_t* ct = nonce + NONCE_SIZE;
+    const uint8_t* tag = ct + KEY_SIZE;
     
-    // Derive wrapping key from passphrase
-    std::array<uint8_t, KEY_SIZE> wrapping_key{};
-    crypto::pbkdf2_hmac_sha256(
-        args.passphrase,
-        std::vector<uint8_t>(salt, salt + SALT_SIZE),
-        args.pbkdf2_iters,
-        wrapping_key.data(),
-        wrapping_key.size()
+    // Derive wrapping key
+    auto wk = derive_wrapping_key(passphrase, salt);
+    
+    // AAD = MAGIC || VERSION || SALT || NONCE
+    const uint8_t* aad = wrapped.data();
+    size_t aad_len = 4 + 1 + SALT_SIZE + NONCE_SIZE;
+    
+    // Decrypt and verify
+    bool success = aead::aead_chacha20_poly1305_decrypt(
+        wk.data(), nonce,
+        aad, aad_len,
+        ct, KEY_SIZE,
+        tag, key_out
     );
     
-    // Decrypt the key
-    std::array<uint8_t, KEY_SIZE> key{};
-    if (!aead::aead_chacha20_poly1305_decrypt(
-            wrapping_key.data(),
-            nonce,
-            salt,
-            SALT_SIZE,
-            ciphertext,
-            KEY_SIZE,
-            tag,
-            key.data())) {
-        std::cerr << "Error: Decryption failed (wrong passphrase or corrupted file)" << std::endl;
-        crypto::secure_zero(wrapping_key.data(), wrapping_key.size());
+    crypto_utils::secure_zero(wk.data(), wk.size());
+    
+    if (!success) {
+        std::cerr << "Error: Authentication failed (wrong passphrase or corrupted key)\n";
+    }
+    
+    return success;
+}
+
+// Write binary data to file
+bool write_file(const std::string& path, const uint8_t* data, size_t len) {
+    std::ofstream out(path, std::ios::binary);
+    if (!out) {
+        std::cerr << "Error: Cannot open file for writing: " << path << "\n";
         return false;
     }
-    
-    std::string b64 = crypto::base64::encode(key.data(), key.size());
-    std::string fingerprint = key_fingerprint(key);
-    
-    if (args.key_out.empty()) {
-        // Print to stdout
-        std::cout << "Key (base64): " << b64 << std::endl;
-        std::cout << "Fingerprint:  " << fingerprint << std::endl;
-    } else {
-        // Write to file
-        std::ofstream out(args.key_out);
-        if (!out) {
-            std::cerr << "Error: Cannot open output file: " << args.key_out << std::endl;
-            crypto::secure_zero(key.data(), key.size());
-            crypto::secure_zero(wrapping_key.data(), wrapping_key.size());
-            return false;
-        }
-        out << b64 << std::endl;
-        out.close();
-        
-        std::cout << "Key saved to: " << args.key_out << std::endl;
-        std::cout << "Fingerprint:  " << fingerprint << std::endl;
+    out.write(reinterpret_cast<const char*>(data), static_cast<std::streamsize>(len));
+    return out.good();
+}
+
+// Read binary data from file
+std::vector<uint8_t> read_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        std::cerr << "Error: Cannot open file for reading: " << path << "\n";
+        return {};
     }
-    
-    crypto::secure_zero(key.data(), key.size());
-    crypto::secure_zero(wrapping_key.data(), wrapping_key.size());
-    return true;
+    auto size = in.tellg();
+    if (size <= 0) {
+        std::cerr << "Error: File is empty or unreadable: " << path << "\n";
+        return {};
+    }
+    std::vector<uint8_t> data(static_cast<size_t>(size));
+    in.seekg(0);
+    in.read(reinterpret_cast<char*>(data.data()), size);
+    return data;
 }
 
 } // anonymous namespace
 
 int main(int argc, char* argv[]) {
-    Args args;
-    
-    if (!parse_args(argc, argv, args)) {
+    if (argc < 2) {
         print_usage();
         return 1;
     }
     
-    if (args.help) {
-        print_usage();
-        return 0;
+    std::string mode;
+    std::string key_out_path;
+    std::string wrap_passphrase;
+    std::string unwrap_file;
+    std::string export_file;
+    std::string passphrase;
+    bool output_hex = false;
+    
+    // Parse arguments
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        
+        if (arg == "--gen-key") {
+            mode = "gen-key";
+        } else if (arg == "--unwrap") {
+            mode = "unwrap";
+            if (i + 1 < argc) {
+                unwrap_file = argv[++i];
+            }
+        } else if (arg == "--export-hex") {
+            mode = "export-hex";
+            if (i + 1 < argc) {
+                export_file = argv[++i];
+            }
+        } else if (arg == "--key-out") {
+            if (i + 1 < argc) {
+                key_out_path = argv[++i];
+            }
+        } else if (arg == "--wrap") {
+            if (i + 1 < argc) {
+                wrap_passphrase = argv[++i];
+            }
+        } else if (arg == "--pass") {
+            if (i + 1 < argc) {
+                passphrase = argv[++i];
+            }
+        } else if (arg == "--hex") {
+            output_hex = true;
+        } else if (arg == "--help" || arg == "-h") {
+            print_usage();
+            return 0;
+        } else {
+            std::cerr << "Error: Unknown option: " << arg << "\n";
+            print_usage();
+            return 1;
+        }
     }
     
-    // Count how many modes are selected
-    int mode_count = (args.gen_key ? 1 : 0) + (args.wrap ? 1 : 0) + (args.unwrap ? 1 : 0);
-    
-    if (mode_count == 0) {
-        std::cerr << "Error: No operation specified" << std::endl;
+    // Execute based on mode
+    if (mode == "gen-key") {
+        // Generate a new key
+        std::array<uint8_t, KEY_SIZE> key{};
+        if (!crypto_utils::get_random_bytes(key.data(), key.size())) {
+            std::cerr << "Error: Failed to generate random key (CSPRNG failure)\n";
+            return 1;
+        }
+        
+        if (!wrap_passphrase.empty()) {
+            // Wrap the key
+            auto wrapped = wrap_key(key.data(), wrap_passphrase);
+            crypto_utils::secure_zero(key.data(), key.size());
+            
+            if (wrapped.empty()) {
+                std::cerr << "Error: Failed to wrap key\n";
+                return 1;
+            }
+            
+            if (!key_out_path.empty()) {
+                // Write wrapped key to file
+                if (!write_file(key_out_path, wrapped.data(), wrapped.size())) {
+                    return 1;
+                }
+                std::cout << "Wrapped key written to: " << key_out_path << "\n";
+            } else {
+                // Output as base64 to stdout
+                std::cout << crypto_utils::base64_encode(wrapped) << "\n";
+            }
+        } else {
+            // Output raw key
+            if (!key_out_path.empty()) {
+                // Write raw key to file
+                if (!write_file(key_out_path, key.data(), key.size())) {
+                    crypto_utils::secure_zero(key.data(), key.size());
+                    return 1;
+                }
+                crypto_utils::secure_zero(key.data(), key.size());
+                std::cout << "Key written to: " << key_out_path << "\n";
+            } else {
+                // Output to stdout
+                if (output_hex) {
+                    std::cout << crypto_utils::to_hex(key.data(), key.size()) << "\n";
+                } else {
+                    std::cout << crypto_utils::base64_encode(key.data(), key.size()) << "\n";
+                }
+                crypto_utils::secure_zero(key.data(), key.size());
+            }
+        }
+        
+    } else if (mode == "unwrap") {
+        if (unwrap_file.empty()) {
+            std::cerr << "Error: --unwrap requires a file path\n";
+            return 1;
+        }
+        if (passphrase.empty()) {
+            std::cerr << "Error: --unwrap requires --pass PASSPHRASE\n";
+            return 1;
+        }
+        
+        // Read wrapped key
+        auto wrapped = read_file(unwrap_file);
+        if (wrapped.empty()) {
+            return 1;
+        }
+        
+        // Unwrap
+        std::array<uint8_t, KEY_SIZE> key{};
+        if (!unwrap_key(wrapped, passphrase, key.data())) {
+            return 1;
+        }
+        
+        if (!key_out_path.empty()) {
+            // Write unwrapped key to file
+            if (!write_file(key_out_path, key.data(), key.size())) {
+                crypto_utils::secure_zero(key.data(), key.size());
+                return 1;
+            }
+            crypto_utils::secure_zero(key.data(), key.size());
+            std::cout << "Unwrapped key written to: " << key_out_path << "\n";
+        } else {
+            // Output to stdout
+            if (output_hex) {
+                std::cout << crypto_utils::to_hex(key.data(), key.size()) << "\n";
+            } else {
+                std::cout << crypto_utils::base64_encode(key.data(), key.size()) << "\n";
+            }
+            crypto_utils::secure_zero(key.data(), key.size());
+        }
+        
+    } else if (mode == "export-hex") {
+        if (export_file.empty()) {
+            std::cerr << "Error: --export-hex requires a file path\n";
+            return 1;
+        }
+        
+        // Read key file
+        auto data = read_file(export_file);
+        if (data.empty()) {
+            return 1;
+        }
+        
+        std::array<uint8_t, KEY_SIZE> key{};
+        
+        if (data.size() == WRAPPED_KEY_SIZE) {
+            // It's a wrapped key
+            if (passphrase.empty()) {
+                std::cerr << "Error: Wrapped key requires --pass PASSPHRASE\n";
+                return 1;
+            }
+            if (!unwrap_key(data, passphrase, key.data())) {
+                return 1;
+            }
+        } else if (data.size() == KEY_SIZE) {
+            // It's a raw key
+            std::memcpy(key.data(), data.data(), KEY_SIZE);
+        } else {
+            std::cerr << "Error: Invalid key file size (expected " << KEY_SIZE 
+                      << " or " << WRAPPED_KEY_SIZE << " bytes)\n";
+            return 1;
+        }
+        
+        std::cout << crypto_utils::to_hex(key.data(), key.size()) << "\n";
+        crypto_utils::secure_zero(key.data(), key.size());
+        
+    } else {
+        std::cerr << "Error: No valid mode specified\n";
         print_usage();
         return 1;
-    }
-    
-    if (mode_count > 1) {
-        std::cerr << "Error: Only one operation can be specified at a time" << std::endl;
-        return 1;
-    }
-    
-    if (args.gen_key) {
-        return do_gen_key(args) ? 0 : 1;
-    }
-    
-    if (args.wrap) {
-        return do_wrap_key(args) ? 0 : 1;
-    }
-    
-    if (args.unwrap) {
-        return do_unwrap_key(args) ? 0 : 1;
     }
     
     return 0;

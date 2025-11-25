@@ -19,6 +19,10 @@ using namespace std;
 #include "stb_image.h"
 #include "stb_image_write.h"
 
+// Include crypto utilities for key generation and base64 (after stb to avoid header conflicts)
+#include "crypto/crypto_utils.h"
+#include "crypto/chacha20poly1305.h"
+
 // Securely wipe sensitive buffers to reduce the chance of key/nonce leakage.
 static inline void secure_zero(void* ptr, size_t len){
     volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
@@ -534,6 +538,94 @@ static KeyMaterial derive_keys(const string& pass, const array<uint8_t,16>& salt
     return km;
 }
 
+// Derive keys from a raw 32-byte master key (when using --key instead of --pass)
+static KeyMaterial derive_keys_from_raw(const array<uint8_t,32>& master_key, const array<uint8_t,16>& salt){
+    KeyMaterial km{};
+    // Use HKDF to derive separate keys from master key + salt
+    uint8_t prk[32];
+    sha256::hkdf_sha256_extract(salt.data(), salt.size(), master_key.data(), master_key.size(), prk);
+    uint8_t out[32+32+12];
+    const uint8_t info1[] = "fft_turtle:keys";
+    sha256::hkdf_sha256_expand(prk, info1, sizeof(info1)-1, out, sizeof(out));
+    memcpy(km.path_key.data(), out, 32);
+    memcpy(km.aead_key.data(), out+32, 32);
+    memcpy(km.nonce.data(), out+64, 12);
+    km.salt = salt;
+    secure_zero(out, sizeof(out));
+    secure_zero(prk, sizeof(prk));
+    return km;
+}
+
+// ============================ Key Unwrapping Helpers ========================
+// Wrapped key format: MAGIC(4) || SALT(16) || NONCE(12) || CIPHERTEXT(32) || TAG(16)
+// Total: 80 bytes, then base64 encoded
+static const char WRAPPED_KEY_MAGIC[4] = {'T', 'F', 'K', 'W'}; // TurtleFFT Key Wrapped
+
+// Helper to decode a key from base64 or unwrap a passphrase-protected key
+static bool decode_or_unwrap_key(const string& key_data, const string& unwrap_pass, 
+                                  uint32_t pbkdf2_iter, array<uint8_t, 32>& key_out) {
+    vector<uint8_t> decoded;
+    if(!crypto_utils::base64_decode(key_data, decoded)){
+        return false;
+    }
+    
+    // Check if it's a wrapped key (80 bytes decoded)
+    if(decoded.size() == 80 && 
+       memcmp(decoded.data(), WRAPPED_KEY_MAGIC, 4) == 0){
+        // Wrapped key format
+        if(unwrap_pass.empty()){
+            fprintf(stderr,"Key is wrapped but no unwrap passphrase provided\n");
+            return false;
+        }
+        
+        array<uint8_t, 16> salt;
+        array<uint8_t, 12> nonce;
+        array<uint8_t, 32> ciphertext;
+        array<uint8_t, 16> tag;
+        
+        memcpy(salt.data(), decoded.data() + 4, 16);
+        memcpy(nonce.data(), decoded.data() + 20, 12);
+        memcpy(ciphertext.data(), decoded.data() + 32, 32);
+        memcpy(tag.data(), decoded.data() + 64, 16);
+        
+        // Derive wrapping key
+        uint8_t derived[44];
+        crypto_utils::pbkdf2_hmac_sha256(
+            reinterpret_cast<const uint8_t*>(unwrap_pass.data()), unwrap_pass.size(),
+            salt.data(), salt.size(),
+            pbkdf2_iter,
+            derived, sizeof(derived)
+        );
+        
+        array<uint8_t, 32> wrap_key;
+        array<uint8_t, 12> derived_nonce;
+        memcpy(wrap_key.data(), derived, 32);
+        memcpy(derived_nonce.data(), derived + 32, 12);
+        crypto_utils::secure_zero(derived, sizeof(derived));
+        
+        // Decrypt
+        if(!chacha20poly1305::aead_chacha20_poly1305_decrypt(
+                wrap_key.data(), nonce.data(),
+                nullptr, 0,
+                ciphertext.data(), ciphertext.size(),
+                tag.data(), key_out.data())){
+            crypto_utils::secure_zero(wrap_key.data(), wrap_key.size());
+            return false;
+        }
+        
+        crypto_utils::secure_zero(wrap_key.data(), wrap_key.size());
+        return true;
+    }
+    
+    // Raw key (32 bytes)
+    if(decoded.size() == 32){
+        memcpy(key_out.data(), decoded.data(), 32);
+        return true;
+    }
+    
+    return false;
+}
+
 // ============================ Keystreams for turtle/opcodes ==================
 struct KS {
     array<uint8_t,32> state{};
@@ -684,11 +776,23 @@ struct Turtle {
 static void usage(){
     fprintf(stderr,
       "Usage:\n"
-      "  Embed  : turtlefft embed   --in host.png --out stego.png --secret TEXT --pass PW\n"
+      "  Key Gen: turtlefft gen-key [--key-out FILE] [--wrap-pass PW]\n"
+      "            Generate a new 256-bit master key, print base64 + fingerprint.\n"
+      "            If --key-out is given, export (optionally passphrase-wrapped) key to file.\n"
+      "\n"
+      "  Embed  : turtlefft embed   --in host.png --out stego.png --secret TEXT\n"
+      "            (--pass PW | --key KEY_BASE64)\n"
       "            [--alpha 0.22 --jitter 0.05 --density 0.7 --rmin 0.05 --rmax 0.45 --magmin 0.01 --center 0]\n"
       "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1]\n"
-      "  Extract: turtlefft extract --in stego.png --pass PW\n"
+      "\n"
+      "  Extract: turtlefft extract --in stego.png (--pass PW | --key KEY_BASE64)\n"
       "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1]\n"
+      "\n"
+      "  Key options:\n"
+      "    --pass PW              : Use passphrase (derives key via PBKDF2+HKDF)\n"
+      "    --key KEY_BASE64       : Use raw 32-byte key (base64 encoded)\n"
+      "    --key-out FILE         : Export generated key to file\n"
+      "    --wrap-pass PW         : Wrap exported key with passphrase (ChaCha20-Poly1305)\n"
       "\n"
       "  Hardening features (default enabled):\n"
       "    --pbkdf2_iter N        : PBKDF2 iterations (default: 600000 for >100ms)\n"
@@ -697,6 +801,9 @@ static void usage(){
 }
 struct Args {
     string mode, inPath, outPath, secret, pass;
+    string keyBase64;       // Raw key in base64 (alternative to passphrase)
+    string keyOutPath;      // Path to export generated key
+    string wrapPass;        // Passphrase to wrap exported key
     Params P;
 };
 static bool parse_args(int argc,char**argv, Args& A){
@@ -707,6 +814,9 @@ static bool parse_args(int argc,char**argv, Args& A){
         else if(k=="--out") A.outPath=need();
         else if(k=="--secret") A.secret=need();
         else if(k=="--pass") A.pass=need();
+        else if(k=="--key") A.keyBase64=need();
+        else if(k=="--key-out") A.keyOutPath=need();
+        else if(k=="--wrap-pass") A.wrapPass=need();
         else if(k=="--alpha") A.P.alpha=stod(need());
         else if(k=="--jitter") A.P.jitter=stod(need());
         else if(k=="--density") A.P.density=stod(need());
@@ -719,8 +829,12 @@ static bool parse_args(int argc,char**argv, Args& A){
         else if(k=="--cover_dependent_path") { string v=need(); A.P.cover_dependent_path=(v=="1"||v=="true"); }
         else { fprintf(stderr,"Unknown arg: %s\n", k.c_str()); return false; }
     }
+    // Validate modes
+    if(A.mode=="gen-key") return true; // gen-key has optional args only
     if(A.mode!="embed" && A.mode!="extract") return false;
-    if(A.inPath.empty() || A.pass.empty()) return false;
+    if(A.inPath.empty()) return false;
+    // Need either --pass or --key
+    if(A.pass.empty() && A.keyBase64.empty()) return false;
     if(A.mode=="embed" && (A.outPath.empty() || A.secret.empty())) return false;
     return true;
 }
@@ -772,10 +886,24 @@ static void do_embed(const Args& A){
     vector<double> thr={A.P.magmin*medR, A.P.magmin*medG, A.P.magmin*medB};
 
     // KDF: salt + key split
+    // Support both passphrase-based and raw key-based derivation
     array<uint8_t,16> salt{}; {
         std::random_device rd; for(auto &b:salt) b = (uint8_t)rd();
     }
-    auto km = derive_keys(A.pass, salt, A.P.pbkdf2_iter);
+    
+    KeyMaterial km{};
+    array<uint8_t,32> master_key{}; // Used when --key is provided
+    bool using_raw_key = !A.keyBase64.empty();
+    
+    if(using_raw_key){
+        // Decode the base64 key
+        if(!decode_or_unwrap_key(A.keyBase64, A.wrapPass, A.P.pbkdf2_iter, master_key)){
+            fprintf(stderr,"Failed to decode/unwrap key from --key argument\n"); exit(1);
+        }
+        km = derive_keys_from_raw(master_key, salt);
+    } else {
+        km = derive_keys(A.pass, salt, A.P.pbkdf2_iter);
+    }
 
     // Prepare header first (it will be AAD for AEAD)
     Header Hdr; Hdr.salt=km.salt; Hdr.nonce=km.nonce; Hdr.clen=(uint32_t)A.secret.size();
@@ -784,6 +912,16 @@ static void do_embed(const Args& A){
     #if DEBUG
     fprintf(stderr,"[DEBUG EMBED] clen=%u, header_bytes[34..37]=%02x %02x %02x %02x\n",
             Hdr.clen, header_bytes[34], header_bytes[35], header_bytes[36], header_bytes[37]);
+    fprintf(stderr,"[DEBUG EMBED] salt: ");
+    for(int i=0;i<16;i++) fprintf(stderr,"%02x",km.salt[i]);
+    fprintf(stderr,"\n[DEBUG EMBED] nonce: ");
+    for(int i=0;i<12;i++) fprintf(stderr,"%02x",km.nonce[i]);
+    fprintf(stderr,"\n[DEBUG EMBED] aead_key[0-7]: ");
+    for(int i=0;i<8;i++) fprintf(stderr,"%02x",km.aead_key[i]);
+    fprintf(stderr,"...\n");
+    fprintf(stderr,"[DEBUG EMBED] header_aad[0-7]: ");
+    for(int i=0;i<8;i++) fprintf(stderr,"%02x",header_bytes[i]);
+    fprintf(stderr,"...\n");
     #endif
 
     // AEAD encrypt secret with header as AAD
@@ -798,6 +936,12 @@ static void do_embed(const Args& A){
             fprintf(stderr,"AEAD seal failed\n"); exit(1);
         }
     }
+    
+    #if DEBUG
+    fprintf(stderr,"[DEBUG EMBED] tag: ");
+    for(int i=0;i<16;i++) fprintf(stderr,"%02x",tag[i]);
+    fprintf(stderr,"\n");
+    #endif
 
     // ECC-protected frame:
     // - Header: Repetition-3 of header bits
@@ -833,22 +977,40 @@ static void do_embed(const Args& A){
     // Turtle with path_key, density & jitter
     vector<vector<vector<complex<double>>>> F3={FR,FG,FB};
     
-    // Cover-dependent path key: SHA256(pass || cover_hash)
-    // This binds the turtle path to both passphrase AND cover image
+    // Cover-dependent path key
+    // When using raw key: path_key = SHA256(master_key || cover_hash) or SHA256(master_key)
+    // When using passphrase: path_key = SHA256(pass || cover_hash) or SHA256(pass)
     array<uint8_t,32> path_key;
     if(A.P.cover_dependent_path){
         auto cover_hash = compute_cover_hash(R, G, B, W, H);
-        // Combine passphrase and cover hash
         vector<uint8_t> combined;
-        combined.insert(combined.end(), A.pass.begin(), A.pass.end());
+        if(using_raw_key){
+            combined.insert(combined.end(), master_key.begin(), master_key.end());
+        } else {
+            combined.insert(combined.end(), A.pass.begin(), A.pass.end());
+        }
         combined.insert(combined.end(), cover_hash.begin(), cover_hash.end());
         path_key = sha256::hash(combined.data(), combined.size());
         #if DEBUG
         fprintf(stderr,"[EMBED] Using cover-dependent path key\n");
         #endif
     } else {
-        // Original approach: path key = SHA256(pass) only
-        path_key = sha256::hash(A.pass);
+        if(using_raw_key){
+            path_key = sha256::hash(master_key.data(), master_key.size());
+        } else {
+            path_key = sha256::hash(A.pass);
+        }
+    }
+    
+    #if DEBUG
+    fprintf(stderr,"[EMBED] path_key: ");
+    for(int i = 0; i < 8; i++) fprintf(stderr,"%02x", path_key[i]);
+    fprintf(stderr,"...\n");
+    #endif
+    
+    // Clean up master key if we used it
+    if(using_raw_key){
+        secure_zero(master_key.data(), master_key.size());
     }
     
     // Derive walk keystream and per-plane subkeys from path_key using HKDF
@@ -943,23 +1105,44 @@ static void do_extract(const Args& A){
     // Resolution: We keep turtle path always derived from **path_key = SHA256(pass)** (saltless),
     // while AEAD uses salted keys. That keeps determinism and breaks the circular dependency.
 
+    // When using raw key, decode it first for path key derivation
+    array<uint8_t,32> master_key{};
+    bool using_raw_key = !A.keyBase64.empty();
+    if(using_raw_key){
+        if(!decode_or_unwrap_key(A.keyBase64, A.wrapPass, A.P.pbkdf2_iter, master_key)){
+            fprintf(stderr,"Failed to decode/unwrap key from --key argument\n"); exit(1);
+        }
+    }
+
     // Recompute thresholds and set up turtle with path_key
-    // Cover-dependent path key: SHA256(pass || cover_hash)
+    // Cover-dependent path key: SHA256(pass/master_key || cover_hash)
     array<uint8_t,32> path_key;
     if(A.P.cover_dependent_path){
         auto cover_hash = compute_cover_hash(R, G, B, W, H);
-        // Combine passphrase and cover hash
         vector<uint8_t> combined;
-        combined.insert(combined.end(), A.pass.begin(), A.pass.end());
+        if(using_raw_key){
+            combined.insert(combined.end(), master_key.begin(), master_key.end());
+        } else {
+            combined.insert(combined.end(), A.pass.begin(), A.pass.end());
+        }
         combined.insert(combined.end(), cover_hash.begin(), cover_hash.end());
         path_key = sha256::hash(combined.data(), combined.size());
         #if DEBUG
         fprintf(stderr,"[EXTRACT] Using cover-dependent path key\n");
         #endif
     } else {
-        // Original approach: path key = SHA256(pass) only
-        path_key = sha256::hash(A.pass);
+        if(using_raw_key){
+            path_key = sha256::hash(master_key.data(), master_key.size());
+        } else {
+            path_key = sha256::hash(A.pass);
+        }
     }
+    
+    #if DEBUG
+    fprintf(stderr,"[EXTRACT] path_key: ");
+    for(int i = 0; i < 8; i++) fprintf(stderr,"%02x", path_key[i]);
+    fprintf(stderr,"...\n");
+    #endif
     
     // Derive walk keystream and per-plane subkeys from path_key using HKDF
     uint8_t sub[32*4]; // walk + R + G + B
@@ -1049,8 +1232,31 @@ static void do_extract(const Args& A){
     vector<uint8_t> ct(rest.begin(), rest.begin()+Hdr.clen);
     array<uint8_t,16> tag; memcpy(tag.data(), rest.data()+Hdr.clen, 16);
 
-    // Derive AEAD keys using PBKDF2(pass, salt)
-    auto km = derive_keys(A.pass, Hdr.salt, A.P.pbkdf2_iter);
+    // Derive AEAD keys
+    KeyMaterial km{};
+    if(using_raw_key){
+        km = derive_keys_from_raw(master_key, Hdr.salt);
+        // Clean up master key now that we've derived AEAD keys
+        secure_zero(master_key.data(), master_key.size());
+    } else {
+        km = derive_keys(A.pass, Hdr.salt, A.P.pbkdf2_iter);
+    }
+    
+    #if DEBUG
+    fprintf(stderr,"[DEBUG EXTRACT] salt from header: ");
+    for(int i=0;i<16;i++) fprintf(stderr,"%02x",Hdr.salt[i]);
+    fprintf(stderr,"\n[DEBUG EXTRACT] derived nonce: ");
+    for(int i=0;i<12;i++) fprintf(stderr,"%02x",km.nonce[i]);
+    fprintf(stderr,"\n[DEBUG EXTRACT] aead_key[0-7]: ");
+    for(int i=0;i<8;i++) fprintf(stderr,"%02x",km.aead_key[i]);
+    fprintf(stderr,"...\n");
+    fprintf(stderr,"[DEBUG EXTRACT] header_aad[0-7]: ");
+    for(int i=0;i<8;i++) fprintf(stderr,"%02x",hdr_bytes[i]);
+    fprintf(stderr,"...\n");
+    fprintf(stderr,"[DEBUG EXTRACT] tag: ");
+    for(int i=0;i<16;i++) fprintf(stderr,"%02x",tag[i]);
+    fprintf(stderr,"\n");
+    #endif
     
     // Use the original decoded header bytes directly for AAD verification
     // (instead of reconstructing, to ensure exact match)
@@ -1067,10 +1273,116 @@ static void do_extract(const Args& A){
     printf("%s\n", secret.c_str());
 }
 
+// ============================ KEY GENERATION ================================
+static void do_gen_key(const Args& A){
+    // Generate 32-byte master key using OS CSPRNG
+    array<uint8_t, 32> master_key{};
+    if(!crypto_utils::get_random_bytes(master_key)){
+        fprintf(stderr,"Failed to generate random key (CSPRNG error)\n"); exit(1);
+    }
+    
+    // Compute fingerprint
+    string fingerprint = crypto_utils::key_fingerprint(master_key);
+    
+    // Encode key to base64
+    string key_b64 = crypto_utils::base64_encode(master_key.data(), master_key.size());
+    
+    // Print to stdout
+    printf("Generated 256-bit master key:\n");
+    printf("  Base64: %s\n", key_b64.c_str());
+    printf("  Fingerprint: %s\n", fingerprint.c_str());
+    
+    // Export to file if requested
+    if(!A.keyOutPath.empty()){
+        vector<uint8_t> export_data;
+        
+        if(!A.wrapPass.empty()){
+            // Wrap key with passphrase using ChaCha20-Poly1305
+            // Derive wrapping key from passphrase using PBKDF2
+            array<uint8_t, 16> salt{};
+            if(!crypto_utils::get_random_bytes(salt)){
+                fprintf(stderr,"Failed to generate salt\n"); exit(1);
+            }
+            
+            // Derive 32-byte wrapping key + 12-byte nonce
+            uint8_t derived[44];
+            crypto_utils::pbkdf2_hmac_sha256(
+                reinterpret_cast<const uint8_t*>(A.wrapPass.data()), A.wrapPass.size(),
+                salt.data(), salt.size(),
+                A.P.pbkdf2_iter,
+                derived, sizeof(derived)
+            );
+            
+            array<uint8_t, 32> wrap_key;
+            array<uint8_t, 12> nonce;
+            memcpy(wrap_key.data(), derived, 32);
+            memcpy(nonce.data(), derived + 32, 12);
+            crypto_utils::secure_zero(derived, sizeof(derived));
+            
+            // Encrypt master key
+            array<uint8_t, 32> ciphertext;
+            array<uint8_t, 16> tag;
+            if(!chacha20poly1305::aead_chacha20_poly1305_encrypt(
+                    wrap_key.data(), nonce.data(),
+                    nullptr, 0, // No AAD
+                    master_key.data(), master_key.size(),
+                    ciphertext.data(), tag.data())){
+                fprintf(stderr,"Failed to wrap key\n"); exit(1);
+            }
+            
+            // Build wrapped key format: MAGIC || SALT || NONCE || CT || TAG
+            export_data.insert(export_data.end(), WRAPPED_KEY_MAGIC, WRAPPED_KEY_MAGIC + 4);
+            export_data.insert(export_data.end(), salt.begin(), salt.end());
+            export_data.insert(export_data.end(), nonce.begin(), nonce.end());
+            export_data.insert(export_data.end(), ciphertext.begin(), ciphertext.end());
+            export_data.insert(export_data.end(), tag.begin(), tag.end());
+            
+            // Clean up
+            crypto_utils::secure_zero(wrap_key.data(), wrap_key.size());
+            crypto_utils::secure_zero(ciphertext.data(), ciphertext.size());
+            
+            printf("  Wrapped with passphrase and exported to: %s\n", A.keyOutPath.c_str());
+        } else {
+            // Export raw key (base64)
+            export_data.assign(key_b64.begin(), key_b64.end());
+            export_data.push_back('\n');
+            printf("  Exported (unencrypted) to: %s\n", A.keyOutPath.c_str());
+        }
+        
+        // Write to file
+        FILE* f = fopen(A.keyOutPath.c_str(), "wb");
+        if(!f){
+            fprintf(stderr,"Failed to open %s for writing\n", A.keyOutPath.c_str()); exit(1);
+        }
+        
+        if(A.wrapPass.empty()){
+            // Write as text (base64)
+            if(fwrite(export_data.data(), 1, export_data.size(), f) != export_data.size()){
+                fclose(f);
+                fprintf(stderr,"Failed to write key file\n"); exit(1);
+            }
+        } else {
+            // Write as base64-encoded binary
+            string wrapped_b64 = crypto_utils::base64_encode(export_data.data(), export_data.size());
+            wrapped_b64 += '\n';
+            if(fwrite(wrapped_b64.data(), 1, wrapped_b64.size(), f) != wrapped_b64.size()){
+                fclose(f);
+                fprintf(stderr,"Failed to write key file\n"); exit(1);
+            }
+        }
+        fclose(f);
+    }
+    
+    // Clean up master key
+    crypto_utils::secure_zero(master_key.data(), master_key.size());
+}
+
 // ============================ main ==========================================
 int main(int argc,char**argv){
     ios::sync_with_stdio(false); cin.tie(nullptr);
     Args A; if(!parse_args(argc,argv,A)){ usage(); return 1; }
-    if(A.mode=="embed") do_embed(A); else do_extract(A);
+    if(A.mode=="gen-key") do_gen_key(A);
+    else if(A.mode=="embed") do_embed(A);
+    else do_extract(A);
     return 0;
 }
