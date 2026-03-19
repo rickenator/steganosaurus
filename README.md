@@ -4,6 +4,8 @@
   <img src="doc/turtlewalk_fixed2.svg" alt="Turtlewalk FFT Path Diagram" width="650px">
 </p>
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/rickenator/steganosaurus)
+
 # TurtleFFT
 
 TurtleFFT is a frequency-domain steganography system that hides encrypted data inside the *phase* of a 2D FFT of an image.
