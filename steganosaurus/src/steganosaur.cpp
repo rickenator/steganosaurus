@@ -6,8 +6,9 @@
 // Build: g++ -std=c++17 -O3 -march=native turtle_fft_stego_aead.cpp -o turtlefft
 
 // Debug output: set to 1 to enable detailed logging
+#define DEBUG 1
 #ifndef DEBUG
-#define DEBUG 0
+
 #endif
 
 #include <bits/stdc++.h>
@@ -373,7 +374,7 @@ static inline pair<int,int> conj_idx(int y,int x,int H,int W){
 static inline double hypot_idx(int y,int x){ return hypot((double)y,(double)x); }
 
 struct Params {
-    double alpha = 0.50, rmin = 0.05, rmax = 0.45, magmin = 0.01, density=0.7, jitter=0.0;
+    double alpha = 0.80, rmin = 0.05, rmax = 0.45, magmin = 0.01, density=0.7, jitter=0.0;
     bool center=false;
     uint32_t pbkdf2_iter = 600000; // Increased from 200k to 600k for >100ms key derivation
     bool adaptive_alpha = false; // Adaptive phase shift (experimental - needs refinement for reliable decoding)
