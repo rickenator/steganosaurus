@@ -1,0 +1,210 @@
+# TurtleFFT Project Plan & Recovery Document
+
+> **Last updated**: 2026-07-06  
+> **Current branch**: `main` (commit `64c2374` — "Increase default alpha from 0.50 to 0.80")  
+> **Working directory**: `/usr/export/rick/Projects/Steganosaurus`
+
+---
+
+## Current State Summary
+
+TurtleFFT is a frequency-domain steganography system that hides encrypted data inside the phase of a 2D FFT of an image. The core system is **production-ready** and deployed on GitHub. There are **two experimental features** disabled by default that need work: adaptive phase shift and cover-dependent path key. The codebase is a C++17 single-file main (`steganosaur.cpp`) with a crypto library in `src/crypto/`.
+
+### Working directory status (as of last session)
+- **HEAD**: commit `64c2374` — "Increase default alpha from 0.50 to 0.80" (pushed to origin/main)
+- **Uncommitted changes**: None
+- **Untracked files**: `stego/` directory (emu_original.png, emu_stego.png), `test_images/` directory (emu.png — a 1448×1086 PNG)
+- **Build exists**: `steganosaurus/build/turtlefft` and `steganosaurus/build/turtlefft-key` built and functional
+
+### Key build command
+```bash
+cd steganosaurus
+mkdir -p build && cd build
+cmake .. && cmake --build .
+```
+Or the one-line compile:
+```bash
+g++ -std=c++17 -O3 -march=native src/steganosaur.cpp -o turtlefft
+```
+No external dependencies — uses stb_image/stb_image_write (bundled in `include/`) and self-implemented SHA-256, ChaCha20-Poly1305 AEAD, PBKDF2, HKDF.
+
+---
+
+## Completed Features (Production-Ready)
+
+### Tier 1 — Security Hardening (commit 0bd4639)
+
+- ✅ **Alpha increase to 0.80** (commit 64c2374) — Increased default embedding phase amplitude from 0.50 to 0.80 radians for robust round-trip extraction. Tested: 10/10 round-trip at alpha=0.80, 0 failures across 0.40-1.00 range, all 5 test_hardening.sh tests pass.
+- ✅ **Header as AAD** in ChaCha20-Poly1305 AEAD (prevents header tampering/oracle attacks)
+- ✅ **Per-plane HKDF subkeys** — separate keystreams for R, G, B channels (ks_r, ks_g, ks_b) and walk keystream (ks_walk)
+- ✅ **PBKDF2 + HKDF** key derivation with 600,000 default iterations (~6 seconds)
+- ✅ **Constant-time MAC comparison** — prevents timing attacks on Poly1305 tag verification
+- ✅ **Repetition-3 + Repetition-7 ECC** for 100% reliable extraction (lossless PNG only)
+- ✅ **Position-based bin selection** (annulus within rmin/rmax, avoiding DC and axes) — deterministic across embed/extract
+- ✅ **turtlefft-key** CLI tool for secure key generation, wrapping, and unwrapping
+- ✅ Cross-platform CSPRNG (BCryptGenRandom, getrandom, arc4random_buf, /dev/urandom fallback)
+
+### Tier 2 — Reliability (commit 28ecead)
+- ✅ **Removed magnitude-based bin check** that caused embed/extract mismatch — now 100% reliable with Rep-7 ECC
+
+### Documentation
+- ✅ `README.md` — user documentation
+- ✅ `doc/HARDENING.md` — detailed security analysis
+- ✅ `doc/SUMMARY.md` — implementation summary
+- ✅ `doc/ATTACKS.md` — adversarial red-team analysis
+- ✅ `doc/TODO.md` — development roadmap
+- ✅ `doc/TESTING.md` — test suite documentation
+- ✅ `test_hardening.sh` — functional test suite
+- ✅ `test_kdf_timing.sh` — KDF timing verification
+
+---
+
+## In-Progress / Pending Work
+
+### Immediate Tasks (Tier 2 — High Priority)
+
+1. **DEBUG flag** in `steganosaurus/src/steganosaur.cpp`
+   - Line 9: `#define DEBUG 1` (was `0` in production)
+   - The `#ifndef DEBUG` / `#endif` block is empty (the old `#define DEBUG 0` line was removed)
+   - **Current status**: DEBUG=1 for active development. Change to 0 before production release.
+
+2. **QIM / Relative Quantization** (doc/TODO.md Tier 2)
+   - Replace absolute ±α phase nudges with relative quantization (QIM or STDM)
+   - Reduces fixed offset signature in global phase histogram
+   - Requires: testing framework for phase histogram analysis
+   - Priority: High — this is the #1 detectability improvement
+
+3. **Cover-Dependent Path Key** (doc/TODO.md Tier 2)
+   - Derive `path_key = SHA256(pass || pHash(cover))`
+   - Defeats collusion averaging across multiple images with same passphrase
+   - Challenge: pHash must be stable under metadata changes
+   - Alternative: Optional per-image nonce stored in authenticated header
+
+4. **Per-bin Randomized Alpha** (doc/TODO.md Tier 2)
+   - Add small variance to α per bin: `α_i ~ N(μ, σ²)`
+   - Blurs histogram peaks without full QIM complexity
+   - Priority: Medium — quick win for detection resistance
+
+### Longer-Term Tasks (Tier 3 — Research)
+
+5. **Stronger FEC** — Replace Hamming(7,4) with Reed-Solomon or LDPC (currently using Rep-7 which provides ~43% bit error tolerance)
+6. **Adaptive Masking** — Content-aware embedding (elevate α only where spectral mask is strong)
+7. **Conservative Defaults & Stealth Mode** — `--mode stealth` preset, `--mode throughput` preset
+8. **Empirical Detection Testing Framework** — KL/ROC tests, collusion tests, SRM classifier
+9. **Payload Padding** — Random padding to obscure message length
+
+---
+
+## Architecture & Code Layout
+
+```
+Steganosaurus/
+├── README.md                     # User documentation
+├── LICENSE                       # Apache 2.0
+├── steganosaurus/
+│   ├── CMakeLists.txt            # Build: turtlefft + turtlefft-key + chacha20poly1305 lib
+│   ├── .gitignore
+│   ├── README.md                 # Inline project README
+│   ├── include/
+│   │   ├── stb_image.h           # Image loading (single-file)
+│   │   └── stb_image_write.h     # Image writing (single-file)
+│   ├── src/
+│   │   ├── steganosaur.cpp       # Main implementation (1427 lines)
+│   │   │   # Contains: SHA-256, PBKDF2, HKDF, FFT, ECC, turtlewalk, CLI, embed/extract/gen-key
+│   │   ├── crypto/
+│   │   │   ├── crypto_utils.h    # Cross-platform crypto helpers (562 lines)
+│   │   │   └── chacha20poly1305.cpp  # AEAD implementation (305 lines)
+│   │   └── crypto/
+│   │       └── chacha20poly1305.h  # AEAD header
+│   ├── tools/
+│   │   ├── gen_png.cpp           # Test image generator
+│   │   └── turtlefft-key.cpp     # Key generation CLI tool
+│   └── build/                    # CMake build output (gitignored)
+├── doc/
+│   ├── SUMMARY.md                # Implementation summary
+│   ├── HARDENING.md              # Security hardening analysis
+│   ├── ATTACKS.md                # Red-team threat analysis
+│   ├── TODO.md                   # Development roadmap
+│   ├── TESTING.md                # Test suite docs
+│   ├── PAPER.md                  # Research/paper notes
+│   └── turtlewalk_fixed2.svg     # FFT path diagram
+├── stego/                        # Untracked — sample stego images
+│   ├── emu_original.png          # 1448×1086 PNG (2.4 MB)
+│   └── emu_stego.png             # Stego output
+├── test_images/                  # Untracked — test assets
+│   └── emu.png                   # 1448×1086 PNG (2.4 MB)
+├── test_hardening.sh             # Functional test suite
+└── test_kdf_timing.sh            # KDF timing verification
+```
+
+---
+
+## Key Implementation Details (for a fresh session)
+
+### steganosaur.cpp Structure (1427 lines)
+1. **Lines 1-100**: Includes, stb_image/stb_image_write, crypto headers, SHA-256 implementation (self-contained)
+2. **Lines 100-300**: PBKDF2, HKDF, constant-time compare, secure_zero
+3. **Lines 300-500**: FFT (2D FFT with Cooley-Tukey), polar/complex utilities
+4. **Lines 500-700**: ECC (Repetition-3 for header, Hamming(7,4) for payload, Repetition-7 for final)
+5. **Lines 700-900**: Turtlewalk path generation (SHA256(passphrase) → deterministic bin selection in annulus)
+6. **Lines 900-1100**: Embed function (encrypt → ECC → turtlewalk → phase embedding → IFFT → save)
+7. **Lines 1100-1300**: Extract function (FFT → turtlewalk → phase extraction → ECC decode → decrypt → output)
+8. **Lines 1300-1427**: CLI argument parsing, key generation (`gen-key` mode), main()
+
+### Header Format (embedded in stego image)
+```
+MAGIC (4 bytes) || SALT (32 bytes) || NONCE (12 bytes) || CLEN (4 bytes) || CT || TAG (16 bytes)
+```
+- MAGIC: Identifies valid stego payload
+- SALT: PBKDF2 salt (SHA256 pass → derive encryption key)
+- NONCE: ChaCha20 nonce (HKDF-derived from same key)
+- CLEN: Ciphertext length (little-endian uint32)
+- CT + TAG: Encrypted payload (header is AAD)
+
+### Embedding Parameters
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `alpha` | 0.80 | Embedding phase amplitude (increased from 0.50 in commit 64c2374) |
+| `jitter` | 0.0 | Phase jitter (disabled for determinism) |
+| `density` | 0.7 | Probability a valid bin is used |
+| `rmin/rmax` | 0.05/0.45 | Radial embedding region |
+| `pbkdf2_iter` | 600000 | KDF iterations |
+
+### Capacity Estimates (1448×1086 emu image)
+- ~4-12 KB depending on texture content
+
+---
+
+## Recovery Checklist
+
+If a fresh session picks up this project:
+
+1. **Read this file** — it's the primary recovery document.
+2. **Check git status** — `git status` to see uncommitted/untracked changes.
+3. **Check git log** — `git log --oneline -20` to see recent commits.
+4. **Verify build** — `cd steganosaurus && mkdir -p build && cd build && cmake .. && cmake --build .`
+5. **Run tests** — `cd steganosaurus/build && ./turtlefft embed --in ../tools/gen_png.cpp ...` or use `test_hardening.sh`
+6. **Check TODO.md** — `doc/TODO.md` has the full development roadmap with priorities.
+7. **Check ATTACKS.md** — `doc/ATTACKS.md` has the threat model and remaining vulnerabilities.
+8. **Check HARDENING.md** — `doc/HARDENING.md` has the security analysis and experimental features status.
+
+---
+
+## Known Issues
+
+1. **DEBUG=1 uncommitted**: `steganosaurus/src/steganosaur.cpp` line 9 has `#define DEBUG 1` — should be 0 for production releases.
+2. **Untracked stego/ and test_images/**: These contain large test images (2.4 MB each) that are not gitignored.
+3. **Experimental features broken**: `--adaptive_alpha 1` and `--cover_dependent_path 1` cause decoding failures (known, documented).
+4. **No CI**: No GitHub Actions or automated testing pipeline configured.
+5. **Single-file main**: `steganosaur.cpp` is 1427 lines and contains everything (SHA-256, crypto, FFT, CLI) — modularization would help maintainability but isn't urgent.
+
+---
+
+## GitHub Repository
+
+- **Remote**: `origin/main` on GitHub
+- **PR #8**: Merged — "Fix long embedded messages"
+- **PR #7**: Merged — "Run tests after merge"
+- **PR #5-6**: Merged — Key generation features
+- **PR #4**: Merged — Key generation in CLI
+- **DeepWiki**: Linked via badge at `deepwiki.com/rickenator/steganosaurus`
