@@ -2,6 +2,13 @@
 
 ## Recently Completed (commit 0bd4639)
 
+- [x] **Arbitrary-size and smooth-cover reliability fix (uncommitted)**
+  - Embed/extract now use the largest centered power-of-two FFT region inside the image instead of zero-padding beyond image bounds
+  - Implemented stable strength-ranked bin selection behind `--mag_rank`; default is now `--mag_rank 1`
+  - Ranking uses inner-annulus-first coordinate order with keyed tie-breaks, avoiding post-embed magnitude-order desync
+  - `--mag_rank 0` remains available for legacy random turtlewalk compatibility
+  - Tests: default `selfie.jpg` 1920×1080 JPEG cover passes; default `emu.png` 1448×1086 PNG cover passes; `selfie.jpg --qim 1` passes; full hardening suite passes
+
 - [x] **Implement Header as AAD in AEAD (Tier 1)**
   - Header bytes (salt, nonce, clen) authenticated as AAD in ChaCha20-Poly1305
   - Prevents header tampering and oracle attacks
@@ -70,6 +77,7 @@
   - Compute local spectral contrast
   - Elevate α only where mask is strong (higher mag relative to median)
   - Hide changes in "busy" spectrum regions
+  - Note: do not sort the extraction path by live image magnitudes; prior testing showed that post-embed magnitude changes desynchronize embed/extract order
   - Priority: Low, requires perceptual modeling
 
 - [ ] **Conservative Defaults & Stealth Mode**

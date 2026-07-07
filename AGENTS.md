@@ -45,13 +45,13 @@ cmake --build .
 ### Run Functional Tests
 ```bash
 cd steganosaurus
-./test_hardening.sh
+../test_hardening.sh
 ```
 
 ### Run KDF Timing Tests
 ```bash
 cd steganosaurus
-./test_kdf_timing.sh
+../test_kdf_timing.sh
 ```
 
 ### Manual Quick Test (fast, not secure)
@@ -80,13 +80,14 @@ steganosaurus/
 │   ├── stb_image.h           # Image loading (single-file, public domain)
 │   └── stb_image_write.h     # Image writing (single-file, public domain)
 ├── src/
-│   ├── steganosaur.cpp       # Main implementation (1553 lines)
+│   ├── steganosaur.cpp       # Main implementation (1674 lines)
 │   │   # SHA-256 (self-implemented)
 │   │   # PBKDF2-HMAC-SHA256 (self-implemented)
 │   │   # HKDF (self-implemented)
 │   │   # 2D FFT (Cooley-Tukey)
 │   │   # ECC: Repetition-3 (header), Hamming(7,4), Repetition-7 (payload)
-│   │   # Turtlewalk: SHA256(pass) → deterministic bin path
+│   │   # Turtlewalk: SHA256(pass) → stable strength-ranked deterministic bin path
+│   │   # FFT region: centered in-image power-of-two tile for non-power-of-two covers
 │   │   # Embed/extract: encrypt → ECC → turtlewalk → phase embed → IFFT / reverse
 │   │   # CLI: embed, extract, gen-key modes
 │   ├── crypto/
@@ -139,7 +140,8 @@ steganosaurus/
 ### Embedding Protocol
 - **Header**: `MAGIC(4) || SALT(32) || NONCE(12) || CLEN(4) || CT || TAG(16)`
 - **ECC**: Repetition-3 for header bytes, Repetition-7 for payload bytes
-- **Turtlewalk**: Deterministic bin path from SHA256(passphrase), annulus rmin=0.05, rmax=0.45
+- **Turtlewalk**: Stable strength-ranked bin path from SHA256(passphrase), annulus rmin=0.05, rmax=0.45; `--mag_rank 0` selects the legacy random walk
+- **FFT region**: Non-power-of-two images use the largest centered power-of-two region inside the image; pixels outside that region are preserved in the PNG output
 - **Phase embedding**: `φ_new = φ_old ± α` (absolute, default α=0.80) or QIM-relative (future)
 - **RGB channels**: Independent keystreams (ks_r, ks_g, ks_b) with same bin path
 - **Output format**: PNG (lossless) — JPEG destroys phase data
@@ -149,18 +151,19 @@ steganosaurus/
 ## File-Specific Notes
 
 ### `steganosaurus/src/steganosaur.cpp`
-- **~1553 lines** — the entire application in one file (QIM added, cover hash improved)
-- Contains: SHA-256, PBKDF2, HKDF, FFT, ECC, turtlewalk, embed, extract, CLI, gen-key
+- **1674 lines** — the entire application in one file (QIM, cover hash, centered FFT region, stable ranked path)
+- Contains: SHA-256, PBKDF2, HKDF, FFT, ECC, turtlewalk/ranked selection, embed, extract, CLI, gen-key
 - **Line ranges** (for reference):
   - 1-100: Includes, stb_image/stb_image_write, SHA-256
   - 100-300: PBKDF2, HKDF, constant-time compare
-  - 300-500: 2D FFT, complex number utilities
+  - 300-500: 2D FFT, transform-region helpers, complex number utilities
   - 500-700: ECC encoding/decoding (Rep-3, Hamming(7,4), Rep-7)
-  - 700-900: Turtlewalk path generation, bin selection
-  - 768-850: QIM (Quantization Index Modulation) — write_bit_on_bin_qim, read_bit_from_bin_qim
-  - 1100-1300: `do_extract()` — FFT, extract phases, ECC decode, decrypt
-  - 1300-1427: CLI parsing, `do_gen_key()`, `main()`
-- **DEBUG macro** (line 9): Set to 0 for production. Set to 1 for verbose output.
+  - 700-870: Phase embedding and QIM (Quantization Index Modulation)
+  - 870-1010: Turtlewalk path generation and stable strength-ranked bin selection
+  - 1110-1330: `do_embed()` — FFT region, encrypt, ECC, phase embed, IFFT, save
+  - 1340-1560: `do_extract()` — FFT region, extract phases, ECC decode, decrypt
+  - 1560-1674: `do_gen_key()`, `main()`
+- **DEBUG macro** (top of file): Defaults to 0 for production. Compile with `-DDEBUG=1` for verbose output.
 
 ### `steganosaurus/src/crypto/chacha20poly1305.cpp`
 - **305 lines** — RFC 8439 ChaCha20-Poly1305 AEAD
@@ -218,7 +221,7 @@ Failure to keep these in sync is considered a defect. A fresh session **must** b
 - **Sync before push**: After every commit, update PLAN.md, PROJECT_STATUS.md, and doc/TODO.md
 - **Push to origin**: Always push new branches with `-u origin <branch>` so GitHub PR can be created
 - **PR creation**: Use the remote URL provided by `git push` output (e.g., `https://github.com/rickenator/steganosaurus/pull/new/update_070626`)
-- **Current branch**: `update_070626` — JPEG robustness workflow (commit `992bab3`)
+- **Current branch**: `update_070626` — JPEG robustness and arbitrary-size reliability workflow (HEAD `09a2bc5`, uncommitted FFT-region/ranked-path fix)
 
 ---
 
@@ -231,7 +234,7 @@ A fresh session should:
 4. Run `git status` — check uncommitted/untracked changes
 5. Run `git log --oneline -20` — check recent commits
 6. Verify build: `cd steganosaurus && mkdir -p build && cd build && cmake .. && cmake --build .`
-7. Run tests: `cd steganosaurus && ./test_hardening.sh`
+7. Run tests: `cd steganosaurus && ../test_hardening.sh`
 
 ---
 
@@ -242,7 +245,7 @@ A fresh session should:
 2. Make targeted fix — do not reformat or refactor unrelated code
 3. Build: `cd steganosaurus/build && cmake --build .`
 4. Test: manual embed/extract round-trip with `--pbkdf2_iter 10000`
-5. Run full test suite: `./test_hardening.sh`
+5. Run full test suite: `../test_hardening.sh` from `steganosaurus/`
 6. Update PROJECT_STATUS.md and PLAN.md if needed
 
 ### Add a new CLI option

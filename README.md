@@ -26,7 +26,8 @@ The turtle carries the secret inside its shell:
 • Message embedded in FFT *phase*, not in pixel bits  
 • Keyed turtlewalk path derived from SHA256(passphrase)  
 • ECC protection using Repetition-7 (header: Rep-3, payload: Rep-7) for 100% reliable extraction  
-• Position-based bin selection within FFT annulus for deterministic embed/extract matching  
+• Stable strength-ranked bin selection within FFT annulus for robust smooth-cover extraction
+• Centered in-image power-of-two FFT region for non-power-of-two cover sizes
 • RGB plane hopping to minimize local distortion patterns  
 
 ---
@@ -37,8 +38,8 @@ Secret Message
 → ChaCha20-Poly1305 Encryption  
 → ECC (Repetition-7 for payload, Repetition-3 for header)  
 → SHA256(passphrase) → Turtlewalk Path  
-→ Position-based Bin Selection (annulus within rmin/rmax, avoiding DC and axes)  
-→ Phase Embedding in FFT (R, G, B)  
+→ Stable Strength-Ranked Bin Selection (annulus within rmin/rmax, avoiding DC and axes)
+→ Phase Embedding in Centered FFT Region (R, G, B)
 → Inverse FFT → Stego Image Output  
 
 ---
@@ -92,7 +93,7 @@ If the passphrase is wrong, output will fail cleanly.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `alpha` | 0.50 | Embedding phase amplitude (increased for reliability) |
+| `alpha` | 0.80 | Embedding phase amplitude |
 | `jitter` | 0.0 | Phase jitter disabled for deterministic embedding |
 | `density` | 0.7 | Probability a valid bin is used |
 | `rmin/rmax` | 0.05 / 0.45 | Radial region of FFT to embed in |
@@ -100,10 +101,13 @@ If the passphrase is wrong, output will fail cleanly.
 | `pbkdf2_iter` | 600000 | Passphrase strengthening iterations (hardened) |
 | `adaptive_alpha` | 0 | Adaptive phase shift (experimental) |
 | `cover_dependent_path` | 0 | Cover-dependent turtlewalk (experimental) |
+| `qim` | 0 | Quantization index modulation phase embedding |
+| `qim_step` | 1.60 | QIM step size |
+| `mag_rank` | 1 | Stable strength-ranked path; use 0 for legacy random turtlewalk |
 
-**Important:** Extractor must use the same `density` and `pbkdf2_iter` as embedder.
+**Important:** Extractor must use the same non-default `density`, `pbkdf2_iter`, `qim`, `qim_step`, and `mag_rank` settings as embedder.
 
-**Reliability Note:** The combination of Repetition-7 ECC and position-based bin selection provides 100% reliable extraction across all message sizes.
+**Reliability Note:** The combination of Repetition-7 ECC, centered in-image FFT regions, and stable strength-ranked bin selection provides reliable extraction for lossless PNG stego output, including non-power-of-two JPEG covers saved as PNG.
 
 ---
 
@@ -112,8 +116,8 @@ If the passphrase is wrong, output will fail cleanly.
 | Image Size | Approx Payload |
 |------------|----------------|
 | 512×512 | ~1 to 3 KB |
-| 1080p | ~4 to 12 KB |
-| 4K UHD | ~15 to 50 KB |
+| 1080p | ~4 to 12 KB via centered 1024×1024 FFT region |
+| 4K UHD | ~15 to 50 KB via centered power-of-two FFT region |
 
 Busy, high-texture images allow more embedding.
 
@@ -136,6 +140,7 @@ Busy, high-texture images allow more embedding.
 • **Per-plane independent keystreams**: R, G, B channels use separate HKDF-derived keys for jitter, reducing cross-channel coherence artifacts detectable by statistical analysis.  
 • **Phase-domain embedding**: FFT phase modifications are visually imperceptible (PSNR typically >50dB).  
 • **Density shaping**: Only a fraction of suitable bins are used, making statistical detection harder.
+• **QIM mode** (`--qim 1`): Optional quantization index modulation for phase embedding.
 
 ### Experimental Features
 
@@ -145,7 +150,8 @@ Busy, high-texture images allow more embedding.
 ### Robustness & Limitations
 
 • **ECC protection**: Repetition-7 encoding for payload provides ~43% bit error tolerance, ensuring 100% reliable extraction with lossless PNG format.  
-• **Position-based bin selection**: Bins are selected based on position (annulus within rmin/rmax, avoiding DC and axes), not magnitude, ensuring identical bins are used during embed and extract.  
+• **Stable ranked bin selection**: Default `--mag_rank 1` selects inner-annulus bins first with keyed tie-breaks, avoiding fragile live-magnitude sorting while improving smooth-cover reliability.
+• **Arbitrary dimensions**: Non-power-of-two covers use a centered power-of-two FFT region and preserve pixels outside that region.
 • **Known-cover attacks**: This scheme is NOT secure against adversaries who possess the original cover image (they can compute FFT difference).  
 • **Lossy compression**: Heavy JPEG compression or aggressive filtering can destroy phase-domain data → extraction fails.  
 • **Passphrase strength**: Overall security depends on passphrase entropy. Use strong, unique passphrases.

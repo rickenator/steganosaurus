@@ -17,7 +17,7 @@ This directory contains automated tests for validating the security hardening im
 **Usage**:
 ```bash
 cd steganosaurus
-./test_hardening.sh
+../test_hardening.sh
 ```
 
 **Expected Output**:
@@ -39,7 +39,7 @@ cd steganosaurus
 **Usage**:
 ```bash
 cd steganosaurus
-./test_kdf_timing.sh
+../test_kdf_timing.sh
 ```
 
 **Expected Output**:
@@ -210,8 +210,8 @@ jobs:
       - name: Run Tests
         run: |
           cd steganosaurus
-          ./test_hardening.sh
-          ./test_kdf_timing.sh
+          ../test_hardening.sh
+          ../test_kdf_timing.sh
 ```
 
 ## Troubleshooting
@@ -239,7 +239,7 @@ ls -lh host.png  # Should be ~112KB
 ```bash
 # Tests expect to be run from steganosaurus/ directory
 cd steganosaurus
-./test_hardening.sh
+../test_hardening.sh
 
 # Or adjust paths in scripts
 ```

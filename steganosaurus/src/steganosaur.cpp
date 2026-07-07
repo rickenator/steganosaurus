@@ -6,9 +6,8 @@
 // Build: g++ -std=c++17 -O3 -march=native turtle_fft_stego_aead.cpp -o turtlefft
 
 // Debug output: set to 1 to enable detailed logging
-#define DEBUG 1
 #ifndef DEBUG
-
+#define DEBUG 0
 #endif
 
 #include <bits/stdc++.h>
@@ -368,10 +367,24 @@ static void fft2d(vector<vector<complex<double>>>& A, bool inverse){
 
 // ============================ Utilities =====================================
 static size_t next_pow2(size_t v){ size_t p=1; while(p<v) p<<=1; return p; }
+static size_t prev_pow2(size_t v){ size_t p=1; while(p <= v/2) p<<=1; return p; }
 static inline pair<int,int> conj_idx(int y,int x,int H,int W){
     int yy = (y==0)?0:(H - y); int xx = (x==0)?0:(W - x); return {yy%H, xx%W};
 }
 static inline double hypot_idx(int y,int x){ return hypot((double)y,(double)x); }
+
+struct TransformRegion {
+    int x0=0, y0=0, w=0, h=0;
+};
+
+static TransformRegion select_transform_region(int W,int H){
+    TransformRegion r;
+    r.w = (int)prev_pow2((size_t)max(1, W));
+    r.h = (int)prev_pow2((size_t)max(1, H));
+    r.x0 = (W - r.w) / 2;
+    r.y0 = (H - r.h) / 2;
+    return r;
+}
 
 struct Params {
     double alpha = 0.80, rmin = 0.05, rmax = 0.45, magmin = 0.01, density=0.7, jitter=0.0;
@@ -382,16 +395,42 @@ struct Params {
     bool qim = false; // Quantization Index Modulation (replaces absolute ±α phase nudges)
     double qim_step = 1.60; // QIM quantization step size (Δ), min separation = Δ/2
     bool adaptive_qim = false; // DISABLED: per-bin magnitude shifts after IFFT break sync
+    bool mag_rank = true; // Stable strength-ranked selection: inner annulus first, keyed tie-breaks
 };
 
 static void to_planes_u8(const uint8_t* img,int W,int H,int comp, vector<double>& R,vector<double>& G,vector<double>& B){
     R.resize((size_t)W*H); G.resize((size_t)W*H); B.resize((size_t)W*H);
     for(int i=0;i<W*H;i++){ R[i]=img[3*i+0]; G[i]=img[3*i+1]; B[i]=img[3*i+2]; }
 }
+static void to_planes_region_u8(const uint8_t* img,int image_w,int image_h,const TransformRegion& region,
+                                vector<double>& R,vector<double>& G,vector<double>& B){
+    (void)image_h;
+    R.resize((size_t)region.w*region.h);
+    G.resize((size_t)region.w*region.h);
+    B.resize((size_t)region.w*region.h);
+    for(int y=0;y<region.h;y++){
+        for(int x=0;x<region.w;x++){
+            size_t dst = (size_t)y*region.w + x;
+            size_t src = ((size_t)(region.y0 + y)*image_w + (region.x0 + x))*3;
+            R[dst]=img[src+0]; G[dst]=img[src+1]; B[dst]=img[src+2];
+        }
+    }
+}
 static void from_planes_u8(const vector<double>& R,const vector<double>& G,const vector<double>& B,int W,int H, vector<uint8_t>& out){
     out.assign((size_t)W*H*3,255);
     auto clamp8=[&](double v){ return (uint8_t)max(0.0, min(255.0, round(v))); };
     for(int i=0;i<W*H;i++){ out[3*i+0]=clamp8(R[i]); out[3*i+1]=clamp8(G[i]); out[3*i+2]=clamp8(B[i]); }
+}
+static void write_planes_region_u8(const vector<double>& R,const vector<double>& G,const vector<double>& B,
+                                   int image_w,const TransformRegion& region, vector<uint8_t>& out){
+    auto clamp8=[&](double v){ return (uint8_t)max(0.0, min(255.0, round(v))); };
+    for(int y=0;y<region.h;y++){
+        for(int x=0;x<region.w;x++){
+            size_t src = (size_t)y*region.w + x;
+            size_t dst = ((size_t)(region.y0 + y)*image_w + (region.x0 + x))*3;
+            out[dst+0]=clamp8(R[src]); out[dst+1]=clamp8(G[src]); out[dst+2]=clamp8(B[src]);
+        }
+    }
 }
 static void apply_center(vector<double>& P,int W,int H,bool on){ if(!on) return; for(int y=0;y<H;y++) for(int x=0;x<W;x++) if(((x+y)&1)) P[y*W+x]*=-1.0; }
 static vector<vector<complex<double>>> pad_to_fft(const vector<double>& P,int W,int H,int& PW,int& PH){
@@ -834,6 +873,13 @@ static inline int read_bit_from_bin_qim(const vector<vector<complex<double>>>& F
 
 // ============================ Turtle selection ===============================
 struct Turtle {
+    struct Candidate {
+        int plane;
+        int y;
+        int x;
+        uint64_t rank_bucket;
+        uint64_t tie;
+    };
     int y,x,plane,H,W;
     KS* ks_walk; // for turtle path selection
     array<KS*,3> ks_planes; // per-plane keystreams for jitter
@@ -841,10 +887,14 @@ struct Turtle {
     double rmin, rmax;
     const vector<vector<vector<complex<double>>>>* Fref;
     vector<double> thr; // per-plane mag threshold
+    bool mag_rank;
+    vector<Candidate> ranked;
+    size_t ranked_pos=0;
     Turtle(int H,int W, KS* ks_walk, array<KS*,3> ks_planes,double rmin,double rmax,
-           const vector<vector<vector<complex<double>>>>* Fref, vector<double> thr)
+           const vector<vector<vector<complex<double>>>>* Fref, vector<double> thr,
+           bool mag_rank)
     : y(0),x(0),plane(0),H(H),W(W),ks_walk(ks_walk),ks_planes(ks_planes),visited(3, vector<vector<uint8_t>>(H, vector<uint8_t>(W,0))),
-      rmin(rmin),rmax(rmax),Fref(Fref),thr(thr)
+      rmin(rmin),rmax(rmax),Fref(Fref),thr(thr),mag_rank(mag_rank)
     {
     // deterministic seed from path key and dims (bind the walk to the pass)
     // Use walk keystream's key for the turtle walk itself (path selection)
@@ -854,6 +904,7 @@ struct Turtle {
     auto h = sha256::hash(seed);
         uint64_t s=0; for(int i=0;i<8;i++) s=(s<<8)|h[i];
         y = (int)((s>>0)%H); x=(int)((s>>16)%W); plane=(int)((s>>32)%3);
+        if(mag_rank) build_ranked_candidates();
     }
     inline bool annulus_ok(int yy,int xx){
         double r = hypot_idx(yy,xx);
@@ -862,7 +913,64 @@ struct Turtle {
     inline bool mag_ok(int p,int yy,int xx){
         return abs((*Fref)[p][yy][xx]) >= thr[p];
     }
+    inline uint64_t radial_strength_bucket(int yy,int xx) const {
+        double r = hypot_idx(yy,xx);
+        double inner = rmin * min(H,W);
+        double outer = rmax * min(H,W);
+        double span = max(1.0, outer - inner);
+        double normalized = max(0.0, min(1.0, (outer - r) / span));
+        return (uint64_t)floor(normalized * 1000000.0);
+    }
+    uint64_t keyed_tie(int p,int yy,int xx) const {
+        string data;
+        data.reserve(32 + 20);
+        data.append(reinterpret_cast<const char*>(ks_walk->key.data()), ks_walk->key.size());
+        uint8_t buf[20];
+        store32_le((uint32_t)p, buf + 0);
+        store32_le((uint32_t)yy, buf + 4);
+        store32_le((uint32_t)xx, buf + 8);
+        store32_le((uint32_t)H, buf + 12);
+        store32_le((uint32_t)W, buf + 16);
+        data.append(reinterpret_cast<const char*>(buf), sizeof(buf));
+        auto h = sha256::hash(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+        uint64_t out=0; for(int i=0;i<8;i++) out=(out<<8)|h[i];
+        return out;
+    }
+    void build_ranked_candidates(){
+        ranked.clear();
+        for(int p=0;p<3;p++){
+            for(int yy=0;yy<H;yy++){
+                for(int xx=0;xx<W;xx++){
+                    if(on_axis(yy,xx,H,W)) continue;
+                    if(yy==0&&xx==0) continue;
+                    if(!annulus_ok(yy,xx)) continue;
+                    auto [cy,cx]=conj_idx(yy,xx,H,W);
+                    if(cy < yy || (cy==yy && cx < xx)) continue;
+                    ranked.push_back({p, yy, xx, radial_strength_bucket(yy,xx), keyed_tie(p,yy,xx)});
+                }
+            }
+        }
+        sort(ranked.begin(), ranked.end(), [](const Candidate& a,const Candidate& b){
+            if(a.rank_bucket != b.rank_bucket) return a.rank_bucket > b.rank_bucket;
+            return a.tie < b.tie;
+        });
+        #if DEBUG
+        fprintf(stderr,"[TURTLE] mag_rank candidates=%zu\n", ranked.size());
+        #endif
+    }
     void advance_to_valid(){
+        if(mag_rank){
+            while(ranked_pos < ranked.size()){
+                const auto c = ranked[ranked_pos++];
+                plane=c.plane; y=c.y; x=c.x;
+                if(visited[plane][y][x]) continue;
+                auto [cy,cx]=conj_idx(y,x,H,W);
+                if(visited[plane][cy][cx]) continue;
+                return;
+            }
+            fprintf(stderr,"No valid strength-ranked bins left.\n");
+            exit(1);
+        }
         // Use walk keystream for turtle movement
         KS& ks = *ks_walk;
         while(true){
@@ -908,11 +1016,11 @@ static void usage(){
       "            (--pass PW | --key KEY_BASE64)\n"
       "            [--alpha 0.22 --jitter 0.05 --density 0.7 --rmin 0.05 --rmax 0.45 --magmin 0.01 --center 0]\n"
       "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1 --jpeg-out QUALITY]\n"
-      "            [--qim 0|1 --qim_step 1.60 --adaptive_qim 0]\n"
+      "            [--qim 0|1 --qim_step 1.60 --adaptive_qim 0 --mag_rank 0|1]\n"
       "\n"
       "  Extract: turtlefft extract --in stego.png (--pass PW | --key KEY_BASE64)\n"
       "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1 --jpeg-out QUALITY]\n"
-      "            [--qim 0|1 --qim_step 1.60 --adaptive_qim 0]\n"
+      "            [--qim 0|1 --qim_step 1.60 --adaptive_qim 0 --mag_rank 0|1]\n"
       "\n"
       "  Key options:\n"
       "    --pass PW              : Use passphrase (derives key via PBKDF2+HKDF)\n"
@@ -925,8 +1033,9 @@ static void usage(){
       "    --adaptive_alpha 0|1   : Adaptive phase shift per bin (default: 0)\n"
       "    --cover_dependent_path 0|1 : Cover-dependent turtlewalk via pHash (default: 0)\n"
       "    --qim 0|1              : Quantization Index Modulation (default: 0, absolute ±α)\n"
-      "    --qim_step Δ           : QIM step size (default: 0.80)\n"
-      "    --adaptive_qim 0|1     : DISABLED (per-bin magnitude shifts break sync)\n");
+      "    --qim_step Δ           : QIM step size (default: 1.60)\n"
+      "    --adaptive_qim 0|1     : DISABLED (per-bin magnitude shifts break sync)\n"
+      "    --mag_rank 0|1         : Stable strength-ranked bin selection (default: 1; use 0 for legacy path)\n");
 }
 struct Args {
     string mode, inPath, outPath, secret, pass;
@@ -961,6 +1070,7 @@ static bool parse_args(int argc,char**argv, Args& A){
         else if(k=="--qim") { string v=need(); A.P.qim=(v=="1"||v=="true"); }
         else if(k=="--qim_step") A.P.qim_step=stod(need());
         else if(k=="--adaptive_qim") { string v=need(); A.P.adaptive_qim=(v=="1"||v=="true"); }
+        else if(k=="--mag_rank") { string v=need(); A.P.mag_rank=(v=="1"||v=="true"); }
         else { fprintf(stderr,"Unknown arg: %s\n", k.c_str()); return false; }
     }
     // Validate modes
@@ -1006,14 +1116,20 @@ static void do_embed(const Args& A){
     stbi_uc* img = stbi_load(A.inPath.c_str(), &W, &H, &comp, 3);
     if(!img){ fprintf(stderr,"Failed to load %s\n", A.inPath.c_str()); exit(1); }
 
-    vector<double> R,G,B; to_planes_u8(img,W,H,3,R,G,B);
+    TransformRegion region = select_transform_region(W,H);
+    if(region.w < 2 || region.h < 2){
+        fprintf(stderr,"Image too small for FFT embedding: %dx%d\n", W, H); exit(1);
+    }
+    vector<uint8_t> out_img(img, img + (size_t)W*H*3);
+    vector<double> R,G,B; to_planes_region_u8(img,W,H,region,R,G,B);
     stbi_image_free(img);
-    apply_center(R,W,H,A.P.center); apply_center(G,W,H,A.P.center); apply_center(B,W,H,A.P.center);
+    apply_center(R,region.w,region.h,A.P.center); apply_center(G,region.w,region.h,A.P.center); apply_center(B,region.w,region.h,A.P.center);
 
     int PW,PH;
-    auto FR=pad_to_fft(R,W,H,PW,PH), FG=pad_to_fft(G,W,H,PW,PH), FB=pad_to_fft(B,W,H,PW,PH);
+    auto FR=pad_to_fft(R,region.w,region.h,PW,PH), FG=pad_to_fft(G,region.w,region.h,PW,PH), FB=pad_to_fft(B,region.w,region.h,PW,PH);
     #if DEBUG
-    fprintf(stderr,"[EMBED] Image size: %dx%d, FFT padded: %dx%d\n", W, H, PW, PH);
+    fprintf(stderr,"[EMBED] Image size: %dx%d, FFT region: x=%d y=%d %dx%d\n",
+            W, H, region.x0, region.y0, PW, PH);
     #endif
     fft2d(FR,false); fft2d(FG,false); fft2d(FB,false);
     double medR=median_abs(FR), medG=median_abs(FG), medB=median_abs(FB);
@@ -1116,7 +1232,7 @@ static void do_embed(const Args& A){
     // When using passphrase: path_key = SHA256(pass || cover_hash) or SHA256(pass)
     array<uint8_t,32> path_key;
     if(A.P.cover_dependent_path){
-        auto cover_hash = compute_cover_hash(R, G, B, W, H);
+        auto cover_hash = compute_cover_hash(R, G, B, region.w, region.h);
         vector<uint8_t> combined;
         if(using_raw_key){
             combined.insert(combined.end(), master_key.begin(), master_key.end());
@@ -1165,7 +1281,7 @@ static void do_embed(const Args& A){
     // Compute median magnitudes for adaptive alpha
     vector<double> median_mags = {medR, medG, medB};
     
-    Turtle T(PH,PW, &ks_walk, ks_planes, A.P.rmin, A.P.rmax, &F3, thr);
+    Turtle T(PH,PW, &ks_walk, ks_planes, A.P.rmin, A.P.rmax, &F3, thr, A.P.mag_rank);
 
     size_t written=0;
     for(size_t i=0;i<bits.size();++i){
@@ -1200,10 +1316,10 @@ static void do_embed(const Args& A){
 
     // IFFT & save
     fft2d(F3[0],true); fft2d(F3[1],true); fft2d(F3[2],true);
-    auto R2=ifft_crop(F3[0],W,H), G2=ifft_crop(F3[1],W,H), B2=ifft_crop(F3[2],W,H);
-    apply_center(R2,W,H,A.P.center); apply_center(G2,W,H,A.P.center); apply_center(B2,W,H,A.P.center);
-    vector<uint8_t> out; from_planes_u8(R2,G2,B2,W,H,out);
-    if(!stbi_write_png(A.outPath.c_str(), W,H,3,out.data(), W*3)){
+    auto R2=ifft_crop(F3[0],region.w,region.h), G2=ifft_crop(F3[1],region.w,region.h), B2=ifft_crop(F3[2],region.w,region.h);
+    apply_center(R2,region.w,region.h,A.P.center); apply_center(G2,region.w,region.h,A.P.center); apply_center(B2,region.w,region.h,A.P.center);
+    write_planes_region_u8(R2,G2,B2,W,region,out_img);
+    if(!stbi_write_png(A.outPath.c_str(), W,H,3,out_img.data(), W*3)){
         fprintf(stderr,"PNG write failed: %s\n", A.outPath.c_str()); exit(1);
     }
         // JPEG degradation output (simulates X.com/social media upload)
@@ -1227,12 +1343,17 @@ static void do_extract(const Args& A){
     int W,H,comp;
     stbi_uc* img = stbi_load(A.inPath.c_str(), &W, &H, &comp, 3);
     if(!img){ fprintf(stderr,"Failed to load %s\n", A.inPath.c_str()); exit(1); }
-    vector<double> R,G,B; to_planes_u8(img,W,H,3,R,G,B); stbi_image_free(img);
-    apply_center(R,W,H,A.P.center); apply_center(G,W,H,A.P.center); apply_center(B,W,H,A.P.center);
+    TransformRegion region = select_transform_region(W,H);
+    if(region.w < 2 || region.h < 2){
+        fprintf(stderr,"Image too small for FFT extraction: %dx%d\n", W, H); exit(1);
+    }
+    vector<double> R,G,B; to_planes_region_u8(img,W,H,region,R,G,B); stbi_image_free(img);
+    apply_center(R,region.w,region.h,A.P.center); apply_center(G,region.w,region.h,A.P.center); apply_center(B,region.w,region.h,A.P.center);
     int PW,PH;
-    auto FR=pad_to_fft(R,W,H,PW,PH), FG=pad_to_fft(G,W,H,PW,PH), FB=pad_to_fft(B,W,H,PW,PH);
+    auto FR=pad_to_fft(R,region.w,region.h,PW,PH), FG=pad_to_fft(G,region.w,region.h,PW,PH), FB=pad_to_fft(B,region.w,region.h,PW,PH);
     #if DEBUG
-    fprintf(stderr,"[EXTRACT] Image size: %dx%d, FFT padded: %dx%d\n", W, H, PW, PH);
+    fprintf(stderr,"[EXTRACT] Image size: %dx%d, FFT region: x=%d y=%d %dx%d\n",
+            W, H, region.x0, region.y0, PW, PH);
     #endif
     fft2d(FR,false); fft2d(FG,false); fft2d(FB,false);
     double medR=median_abs(FR), medG=median_abs(FG), medB=median_abs(FB);
@@ -1269,7 +1390,7 @@ static void do_extract(const Args& A){
     // Cover-dependent path key: SHA256(pass/master_key || cover_hash)
     array<uint8_t,32> path_key;
     if(A.P.cover_dependent_path){
-        auto cover_hash = compute_cover_hash(R, G, B, W, H);
+        auto cover_hash = compute_cover_hash(R, G, B, region.w, region.h);
         vector<uint8_t> combined;
         if(using_raw_key){
             combined.insert(combined.end(), master_key.begin(), master_key.end());
@@ -1314,7 +1435,7 @@ static void do_extract(const Args& A){
     vector<double> median_mags = {medR, medG, medB};
     
     auto median_thr = thr;
-    Turtle T(PH,PW, &ks_walk, ks_planes, A.P.rmin, A.P.rmax, &F3, median_thr);
+    Turtle T(PH,PW, &ks_walk, ks_planes, A.P.rmin, A.P.rmax, &F3, median_thr, A.P.mag_rank);
 
     auto read_next_bit = [&](double alpha)->int{
         while(true){ T.advance_to_valid(); if(ks_walk.hit_density(A.P.density)) break; T.mark_here(); }

@@ -1,19 +1,20 @@
 # TurtleFFT Project Plan & Recovery Document
 
-> **Last updated**: 2026-07-06  
-> **Current commit**: uncommitted (QIM + cover hash improvements)  
-> **Current branch**: `update_070626` (commit `ca2e2f8` — "Add BER analysis to extract")  
+> **Last updated**: 2026-07-07
+> **Current commit**: `09a2bc5` plus uncommitted reliability fix (FFT region + stable ranked path)
+> **Current branch**: `update_070626` (commit `09a2bc5` — "Add QIM phase embedding, improve cover hash, disable adaptive_qim")
 > **Working directory**: `/usr/export/rick/Projects/Steganosaurus`
 
 ---
 
 ## Current State Summary
 
-TurtleFFT is a frequency-domain steganography system that hides encrypted data inside the phase of a 2D FFT of an image. The core system is **production-ready** and deployed on GitHub. There are **two experimental features** disabled by default that need work: adaptive phase shift and cover-dependent path key. The codebase is a C++17 single-file main (`steganosaur.cpp`) with a crypto library in `src/crypto/`.
+TurtleFFT is a frequency-domain steganography system that hides encrypted data inside the phase of a 2D FFT of an image. The core system is **production-ready** and deployed on GitHub. The default embed/extract path now uses a centered in-image power-of-two FFT region plus stable strength-ranked bin ordering, which fixes the previous failures on non-power-of-two and low-texture JPEG covers. There are **two experimental features** still disabled by default that need work: adaptive phase shift and cover-dependent path key. The codebase is a C++17 single-file main (`steganosaur.cpp`) with a crypto library in `src/crypto/`.
 
 ### Working directory status (as of last session)
-- **HEAD**: commit `ca2e2f8` — "Add BER analysis to extract" (on branch update_070626, pushed)
-- **Uncommitted changes**: QIM implementation, cover hash improvement, adaptive_qim disabled
+- **HEAD**: commit `09a2bc5` — "Add QIM phase embedding, improve cover hash, disable adaptive_qim" (on branch update_070626, pushed)
+- **Uncommitted changes**: centered in-image FFT region for arbitrary image sizes; stable strength-ranked `--mag_rank` path enabled by default; DEBUG reset to production default 0
+- **Uncommitted changes from prior work**: QIM implementation, cover hash improvement, adaptive_qim disabled
 - **Untracked files**: `stego/` directory (emu_original.png, emu_stego.png), `test_images/` directory (emu.png — a 1448×1086 PNG)
 - **Untracked files**: `test_load.jpg` (256×256 JPEG test image), `test_jpeg_robustness.sh` (JPEG robustness test script)
 - **Build exists**: `steganosaurus/build/turtlefft` and `steganosaurus/build/turtlefft-key` built and functional
@@ -60,6 +61,13 @@ No external dependencies — uses stb_image/stb_image_write (bundled in `include
 - ✅ **`--jpeg-out QUALITY` option** — creates degraded JPEG from PNG output for social media upload simulation
 - ✅ **JPEG robustness testing** — all quality levels (Q30-Q100) fail extraction, confirming phase-domain steganography is destroyed by lossy compression
 
+### Tier 2 — Arbitrary-Size / Smooth-Cover Reliability (uncommitted)
+- ✅ **Centered in-image FFT region** — For non-power-of-two images, embed/extract now operate on the largest centered power-of-two region inside the image instead of zero-padding beyond image bounds and cropping away part of the inverse transform.
+- ✅ **Stable strength-ranked bin path** — `--mag_rank` is now implemented and enabled by default. It ranks annulus bins from the inner radius outward with keyed tie-breaks, avoiding image-magnitude-dependent ordering that can desynchronize after embedding.
+- ✅ **Legacy path retained** — `--mag_rank 0` preserves the older random turtlewalk path for compatibility testing.
+- ✅ **selfie.jpg regression fixed** — `test_images/selfie.jpg` (1920x1080 JPEG cover) now extracts `"Citizen Vigilante"` with default settings and with `--qim 1` using `--pbkdf2_iter 10000`.
+- ✅ **Large PNG regression fixed** — `test_images/emu.png` (1448x1086 PNG cover) extracts `"Citizen Vigilante"` with default settings.
+
 ### Documentation
 - ✅ `README.md` — user documentation
 - ✅ `doc/HARDENING.md` — detailed security analysis
@@ -76,24 +84,13 @@ No external dependencies — uses stb_image/stb_image_write (bundled in `include
 
 ### Immediate Tasks (Tier 2 — High Priority)
 
-1. **DEBUG flag** in `steganosaurus/src/steganosaur.cpp`
-   - Line 9: `#define DEBUG 1` (was `0` in production)
-   - The `#ifndef DEBUG` / `#endif` block is empty (the old `#define DEBUG 0` line was removed)
-   - **Current status**: DEBUG=1 for active development. Change to 0 before production release.
-
-2. **QIM / Relative Quantization** (doc/TODO.md Tier 2)
-   - Replace absolute ±α phase nudges with relative quantization (QIM or STDM)
-   - Reduces fixed offset signature in global phase histogram
-   - Requires: testing framework for phase histogram analysis
-   - Priority: High — this is the #1 detectability improvement
-
-3. **Cover-Dependent Path Key** (doc/TODO.md Tier 2)
+1. **Cover-Dependent Path Key** (doc/TODO.md Tier 2)
    - Derive `path_key = SHA256(pass || pHash(cover))`
    - Defeats collusion averaging across multiple images with same passphrase
    - Challenge: pHash must be stable under metadata changes
    - Alternative: Optional per-image nonce stored in authenticated header
 
-4. **Per-bin Randomized Alpha** (doc/TODO.md Tier 2)
+2. **Per-bin Randomized Alpha** (doc/TODO.md Tier 2)
    - Add small variance to α per bin: `α_i ~ N(μ, σ²)`
    - Blurs histogram peaks without full QIM complexity
    - Priority: Medium — quick win for detection resistance
@@ -142,7 +139,7 @@ Steganosaurus/
 │   │   ├── stb_image.h           # Image loading (single-file)
 │   │   └── stb_image_write.h     # Image writing (single-file)
 │   ├── src/
-│   │   ├── steganosaur.cpp       # Main implementation (1427 lines)
+│   │   ├── steganosaur.cpp       # Main implementation (1674 lines)
 │   │   │   # Contains: SHA-256, PBKDF2, HKDF, FFT, ECC, turtlewalk, CLI, embed/extract/gen-key
 │   │   ├── crypto/
 │   │   │   ├── crypto_utils.h    # Cross-platform crypto helpers (562 lines)
@@ -174,15 +171,15 @@ Steganosaurus/
 
 ## Key Implementation Details (for a fresh session)
 
-### steganosaur.cpp Structure (1427 lines)
+### steganosaur.cpp Structure (1674 lines)
 1. **Lines 1-100**: Includes, stb_image/stb_image_write, crypto headers, SHA-256 implementation (self-contained)
 2. **Lines 100-300**: PBKDF2, HKDF, constant-time compare, secure_zero
-3. **Lines 300-500**: FFT (2D FFT with Cooley-Tukey), polar/complex utilities
+3. **Lines 300-500**: FFT (2D FFT with Cooley-Tukey), transform-region helpers, polar/complex utilities
 4. **Lines 500-700**: ECC (Repetition-3 for header, Hamming(7,4) for payload, Repetition-7 for final)
-5. **Lines 700-900**: Turtlewalk path generation (SHA256(passphrase) → deterministic bin selection in annulus)
-6. **Lines 900-1100**: Embed function (encrypt → ECC → turtlewalk → phase embedding → IFFT → save)
-7. **Lines 1100-1300**: Extract function (FFT → turtlewalk → phase extraction → ECC decode → decrypt → output)
-8. **Lines 1300-1427**: CLI argument parsing, key generation (`gen-key` mode), main()
+5. **Lines 700-1000**: Phase embedding/QIM plus turtlewalk path generation and stable ranked bin selection
+6. **Lines 1100-1330**: Embed function (encrypt → ECC → ranked turtlewalk → phase embedding → IFFT → save)
+7. **Lines 1340-1560**: Extract function (FFT → ranked turtlewalk → phase extraction → ECC decode → decrypt → output)
+8. **Lines 1560-1674**: Key generation (`gen-key` mode), main()
 
 ### Header Format (embedded in stego image)
 ```
@@ -201,10 +198,11 @@ MAGIC (4 bytes) || SALT (32 bytes) || NONCE (12 bytes) || CLEN (4 bytes) || CT |
 | `jitter` | 0.0 | Phase jitter (disabled for determinism) |
 | `density` | 0.7 | Probability a valid bin is used |
 | `rmin/rmax` | 0.05/0.45 | Radial embedding region |
+| `mag_rank` | 1 | Stable strength-ranked path, inner annulus first; use 0 for legacy random turtlewalk |
 | `pbkdf2_iter` | 600000 | KDF iterations |
 
 ### Capacity Estimates (1448×1086 emu image)
-- ~4-12 KB depending on texture content
+- Uses a centered 1024x1024 FFT region; ~4-12 KB depending on texture content and selected mode
 
 ---
 
@@ -225,11 +223,11 @@ If a fresh session picks up this project:
 
 ## Known Issues
 
-1. **DEBUG=1 uncommitted**: `steganosaurus/src/steganosaur.cpp` line 9 has `#define DEBUG 1` — should be 0 for production releases.
-2. **Untracked stego/ and test_images/**: These contain large test images (2.4 MB each) that are not gitignored.
-3. **Experimental features broken**: `--adaptive_alpha 1` and `--cover_dependent_path 1` cause decoding failures (known, documented).
+1. **Untracked stego/ test/ and test_images/**: These contain large generated test images and are not gitignored at the repository root.
+2. **Experimental features broken**: `--adaptive_alpha 1` and `--cover_dependent_path 1` cause decoding failures (known, documented).
+3. **Lossy JPEG output still fails**: JPEG input covers are supported, but extraction from JPEG-compressed stego output still fails.
 4. **No CI**: No GitHub Actions or automated testing pipeline configured.
-5. **Single-file main**: `steganosaur.cpp` is 1427 lines and contains everything (SHA-256, crypto, FFT, CLI) — modularization would help maintainability but isn't urgent.
+5. **Single-file main**: `steganosaur.cpp` is 1674 lines and contains everything (SHA-256, crypto, FFT, CLI) — modularization would help maintainability but isn't urgent.
 
 ---
 
