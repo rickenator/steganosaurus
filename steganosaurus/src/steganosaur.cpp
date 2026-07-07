@@ -473,6 +473,18 @@ static vector<uint8_t> rep3_decode_bits(const vector<uint8_t>& bits, bool &ok){
     }
     return out;
 }
+// Repetition-3 decode with BER estimation: returns decoded bits and counts
+// disagreements (groups where 2 bits agree, 1 disagrees — majority vote is
+// correct but the minority bit indicates a transmission error).
+static vector<uint8_t> rep3_decode_bits_with_errors(const vector<uint8_t>& bits, bool &ok, size_t &disagreements){
+    ok = true; disagreements = 0; vector<uint8_t> out; if(bits.size()%3!=0) ok = false;
+    for(size_t i=0;i+2<bits.size(); i+=3){
+        int s = bits[i] + bits[i+1] + bits[i+2];
+        out.push_back((s>=2)?1:0);
+        if(s==1 || s==2) disagreements++; // 2-1 split: one bit flipped
+    }
+    return out;
+}
 
 // Repetition-5 for payload (majority decode, tolerates 40% error rate)
 static vector<uint8_t> rep5_encode_bits(const vector<uint8_t>& bits){
@@ -1240,16 +1252,24 @@ static void do_extract(const Args& A){
     vector<uint8_t> hdr_rep3; hdr_rep3.reserve(header_rep3_bits);
     for(size_t i=0;i<header_rep3_bits;i++) hdr_rep3.push_back(read_next_bit(A.P.alpha));
     bool ok_header=true;
-    auto hdr_bits = rep3_decode_bits(hdr_rep3, ok_header);
+    // BER analysis: use Rep-3 disagreement count to estimate bit error rate
+    size_t rep3_disagreements = 0;
+    auto hdr_bits_ber = rep3_decode_bits_with_errors(hdr_rep3, ok_header, rep3_disagreements);
     if(!ok_header){ fprintf(stderr,"Header ECC length mismatch.\n"); exit(1); }
-    auto hdr_bytes = bytes_from_bits(hdr_bits);
+    auto hdr_bytes = bytes_from_bits(hdr_bits_ber);
     // Debug: print first 4 header bytes
     #if DEBUG
     fprintf(stderr,"[DEBUG] First 4 header bytes: %02x %02x %02x %02x (expect: 46 54 54 47 = FTTG)\n",
             hdr_bytes[0], hdr_bytes[1], hdr_bytes[2], hdr_bytes[3]);
     #endif
     if(hdr_bytes.size() < Header::fixed_len()){ fprintf(stderr,"Header truncated.\n"); exit(1); }
-    if(!(hdr_bytes[0]=='F'&&hdr_bytes[1]=='T'&&hdr_bytes[2]=='T'&&hdr_bytes[3]=='G')){ fprintf(stderr,"Magic not found.\n"); exit(1); }
+    if(!(hdr_bytes[0]=='F'&&hdr_bytes[1]=='T'&&hdr_bytes[2]=='T'&&hdr_bytes[3]=='G')){
+        size_t rep3_groups = hdr_rep3.size() / 3;
+        double ber_pct = (rep3_groups > 0) ? (double)rep3_disagreements / (double)rep3_groups * 100.0 : 0.0;
+        fprintf(stderr,"Magic not found.\n");
+        fprintf(stderr,"BER estimate: %.1f%% (%zu errors in %zu Rep-3 groups)\n", ber_pct, rep3_disagreements, rep3_groups);
+        exit(1);
+    }
     if(hdr_bytes[4] != 2){ fprintf(stderr,"Unsupported version (%u).\n", hdr_bytes[4]); exit(1); }
     
     // Instead of parsing fields individually, just keep the original hdr_bytes for AAD
