@@ -1,6 +1,6 @@
 # TurtleFFT Project Status
 
-> **Last updated**: 2026-07-06  
+> **Last updated: 2026-07-06  
 > **Repository**: Steganosaurus (GitHub: rickenator/steganosaurus)  
 > **Current commit**: `64c2374` — "Increase default alpha from 0.50 to 0.80"
 
@@ -158,9 +158,9 @@
 
 ### Git Status
 ```
-On branch main
-Your branch is up to date with 'origin/main'.
-Latest commit: 64c2374 — "Increase default alpha from 0.50 to 0.80"
+On branch update_070626
+Your branch is up to date with 'origin/update_070626'.
+Latest commit: ca2e2f8 — "Add BER analysis to extract"
 ```
 
 ---
@@ -191,13 +191,13 @@ Latest commit: 64c2374 — "Increase default alpha from 0.50 to 0.80"
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `steganosaurus/src/steganosaur.cpp` | 1441 | Main implementation (SHA-256, crypto, FFT, ECC, CLI, --jpeg-out) |
+| `steganosaurus/src/steganosaur.cpp` | 1461 | Main implementation (SHA-256, crypto, FFT, ECC, CLI, --jpeg-out, BER analysis) |
 | `steganosaurus/src/crypto/crypto_utils.h` | 562 | Cross-platform crypto helpers |
 | `steganosaurus/src/crypto/chacha20poly1305.cpp` | 305 | AEAD implementation |
 | `steganosaurus/src/crypto/chacha20poly1305.h` | ~40 | AEAD header |
 | `steganosaurus/CMakeLists.txt` | 25 | Build configuration |
 
-**Total source code**: ~2,373 lines (excluding stb_image headers)
+**Total source code**: ~2,393 lines (excluding stb_image headers)
 **External dependencies**: None (stb_image/stb_image_write are single-file public domain headers)
 
 ---
@@ -206,7 +206,7 @@ Latest commit: 64c2374 — "Increase default alpha from 0.50 to 0.80"
 
 | # | Issue | Priority | Notes |
 |---|-------|----------|-------|
-| 1 | DEBUG=1 uncommitted in steganosaur.cpp | Low | Set to 0 for production release |
+| 1 | Untracked stego/ and test_images/ directories | Low | Add to .gitignore if unwanted |
 | 2 | Untracked stego/ and test_images/ directories | Low | Add to .gitignore if unwanted |
 | 3 | Experimental features (`--adaptive_alpha`, `--cover_dependent_path`) break extraction | Medium | Documented; need QIM redesign |
 | 4 | No CI/CD pipeline | Medium | Add GitHub Actions per TESTING.md |

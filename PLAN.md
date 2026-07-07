@@ -1,7 +1,7 @@
 # TurtleFFT Project Plan & Recovery Document
 
 > **Last updated**: 2026-07-06  
-> **Current branch**: `main` (commit `64c2374` — "Increase default alpha from 0.50 to 0.80")  
+> **Current branch**: `update_070626` (commit `ca2e2f8` — "Add BER analysis to extract")  
 > **Working directory**: `/usr/export/rick/Projects/Steganosaurus`
 
 ---
@@ -11,8 +11,8 @@
 TurtleFFT is a frequency-domain steganography system that hides encrypted data inside the phase of a 2D FFT of an image. The core system is **production-ready** and deployed on GitHub. There are **two experimental features** disabled by default that need work: adaptive phase shift and cover-dependent path key. The codebase is a C++17 single-file main (`steganosaur.cpp`) with a crypto library in `src/crypto/`.
 
 ### Working directory status (as of last session)
-- **HEAD**: commit `64c2374` — "Increase default alpha from 0.50 to 0.80" (pushed to origin/main)
-- **Uncommitted changes**: `steganosaurus/src/steganosaur.cpp` — added `--jpeg-out QUALITY` option (uses ImageMagick convert to create degraded JPEG from PNG output for social media upload simulation)
+- **HEAD**: commit `ca2e2f8` — "Add BER analysis to extract" (on branch update_070626, pushed)
+- **Uncommitted changes**: none (uses ImageMagick convert to create degraded JPEG from PNG output for social media upload simulation)
 - **Untracked files**: `stego/` directory (emu_original.png, emu_stego.png), `test_images/` directory (emu.png — a 1448×1086 PNG)
 - **Untracked files**: `test_load.jpg` (256×256 JPEG test image), `test_jpeg_robustness.sh` (JPEG robustness test script)
 - **Build exists**: `steganosaurus/build/turtlefft` and `steganosaurus/build/turtlefft-key` built and functional
@@ -47,6 +47,11 @@ No external dependencies — uses stb_image/stb_image_write (bundled in `include
 
 ### Tier 2 — Reliability (commit 28ecead)
 - ✅ **Removed magnitude-based bin check** that caused embed/extract mismatch — now 100% reliable with Rep-7 ECC
+
+### Tier 2 — JPEG Resilience Diagnostics (commit ca2e2f8)
+- ✅ **BER analysis on extract failure** — when "Magic not found", reports `BER estimate: X.X% (Y errors in Z Rep-3 groups)` from Repetition-3 decoding confidence. Helps diagnose whether failure is due to compression artifacts vs wrong password.
+- ✅ **`--jpeg-out QUALITY` option** — creates degraded JPEG from PNG output for social media upload simulation
+- ✅ **JPEG robustness testing** — all quality levels (Q30-Q100) fail extraction, confirming phase-domain steganography is destroyed by lossy compression
 
 ### Documentation
 - ✅ `README.md` — user documentation
