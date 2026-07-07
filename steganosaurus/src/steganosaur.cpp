@@ -821,10 +821,10 @@ static void usage(){
       "  Embed  : turtlefft embed   --in host.png --out stego.png --secret TEXT\n"
       "            (--pass PW | --key KEY_BASE64)\n"
       "            [--alpha 0.22 --jitter 0.05 --density 0.7 --rmin 0.05 --rmax 0.45 --magmin 0.01 --center 0]\n"
-      "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1]\n"
+      "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1 --jpeg-out QUALITY]\n"
       "\n"
       "  Extract: turtlefft extract --in stego.png (--pass PW | --key KEY_BASE64)\n"
-      "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1]\n"
+      "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1 --jpeg-out QUALITY]\n"
       "\n"
       "  Key options:\n"
       "    --pass PW              : Use passphrase (derives key via PBKDF2+HKDF)\n"
@@ -842,6 +842,7 @@ struct Args {
     string keyBase64;       // Raw key in base64 (alternative to passphrase)
     string keyOutPath;      // Path to export generated key
     string wrapPass;        // Passphrase to wrap exported key
+    int    jpegQuality=0;   // If >0, also output degraded JPEG at this quality
     Params P;
 };
 static bool parse_args(int argc,char**argv, Args& A){
@@ -865,6 +866,7 @@ static bool parse_args(int argc,char**argv, Args& A){
         else if(k=="--pbkdf2_iter") A.P.pbkdf2_iter=(uint32_t)stoul(need());
         else if(k=="--adaptive_alpha") { string v=need(); A.P.adaptive_alpha=(v=="1"||v=="true"); }
         else if(k=="--cover_dependent_path") { string v=need(); A.P.cover_dependent_path=(v=="1"||v=="true"); }
+        else if(k=="--jpeg-out") { A.jpegQuality=(int)stoul(need()); }
         else { fprintf(stderr,"Unknown arg: %s\n", k.c_str()); return false; }
     }
     // Validate modes
@@ -1105,6 +1107,18 @@ static void do_embed(const Args& A){
     if(!stbi_write_png(A.outPath.c_str(), W,H,3,out.data(), W*3)){
         fprintf(stderr,"PNG write failed: %s\n", A.outPath.c_str()); exit(1);
     }
+        // JPEG degradation output (simulates X.com/social media upload)
+        if(A.jpegQuality > 0) {
+            string jpegPath = A.outPath.substr(0, A.outPath.rfind('.')) + ".jpg";
+            // Use ImageMagick convert to create JPEG from PNG
+            string cmd = "convert " + A.outPath + " -quality " + to_string(A.jpegQuality) + " " + jpegPath;
+            int rc = system(cmd.c_str());
+            if(rc == 0) {
+                fprintf(stdout, "JPEG degraded: %s (quality %d)\n", jpegPath.c_str(), A.jpegQuality);
+            } else {
+                fprintf(stderr, "Warning: JPEG conversion failed (rc=%d). Is ImageMagick installed?\n", rc);
+            }
+        }
     fprintf(stdout,"Embedded %zu bits into %s (payload %u bytes, ver=2, salt/nonce in header)\n",
             written, A.outPath.c_str(), Hdr.clen);
 }

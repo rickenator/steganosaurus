@@ -116,6 +116,28 @@
 - `test_kdf_timing.sh` — KDF timing verification
 - `doc/TESTING.md` — Full test documentation
 
+
+### JPEG Robustness Testing (New — 2026-07-06)
+
+| Test | Status | Notes |
+|------|--------|-------|
+| `--jpeg-out` option | ✅ Implemented | Uses ImageMagick convert to create degraded JPEG from PNG output |
+| JPEG Q100 extraction | ❌ Fail | Phase data destroyed even at quality 100 |
+| JPEG Q95 extraction | ❌ Fail | — |
+| JPEG Q90 extraction | ❌ Fail | — |
+| JPEG Q85 extraction | ❌ Fail | — |
+| JPEG Q80 extraction | ❌ Fail | — |
+| JPEG Q75 extraction | ❌ Fail | — |
+| JPEG Q70 extraction | ❌ Fail | — |
+| JPEG Q60 extraction | ❌ Fail | — |
+| JPEG Q50 extraction | ❌ Fail | — |
+| JPEG Q40 extraction | ❌ Fail | — |
+| JPEG Q30 extraction | ❌ Fail | — |
+
+**Finding**: All JPEG quality levels fail extraction. This confirms the documented limitation that lossy compression destroys phase-domain steganography data. The `--jpeg-out` feature works correctly for simulating social media upload degradation, but extraction from degraded JPEGs requires stronger ECC (Reed-Solomon).
+
+
+
 ---
 
 ## Uncommitted / Untracked State
@@ -123,7 +145,7 @@
 ### Uncommitted Changes
 | File | Change | Impact |
 |------|--------|--------|
-| *(none)* | All recent changes committed to `main` | — |
+| `steganosaurus/src/steganosaur.cpp` | Added `--jpeg-out QUALITY` option (+16 lines) | JPEG degradation output for social media simulation |
 
 ### Untracked Files
 | Path | Content | Size |
@@ -131,6 +153,8 @@
 | `stego/emu_original.png` | 1448×1086 PNG test cover | 2.4 MB |
 | `stego/emu_stego.png` | Stego output of emu_original.png | 3.5 MB |
 | `test_images/emu.png` | Original 1448×1086 PNG | 2.4 MB |
+| `test_load.jpg` | 256×256 baseline JPEG test image | 3.5 KB |
+| `test_jpeg_robustness.sh` | JPEG robustness test script | — |
 
 ### Git Status
 ```
@@ -167,13 +191,13 @@ Latest commit: 64c2374 — "Increase default alpha from 0.50 to 0.80"
 
 | File | Lines | Description |
 |------|-------|-------------|
-| `steganosaurus/src/steganosaur.cpp` | 1427 | Main implementation (SHA-256, crypto, FFT, ECC, CLI) |
+| `steganosaurus/src/steganosaur.cpp` | 1441 | Main implementation (SHA-256, crypto, FFT, ECC, CLI, --jpeg-out) |
 | `steganosaurus/src/crypto/crypto_utils.h` | 562 | Cross-platform crypto helpers |
 | `steganosaurus/src/crypto/chacha20poly1305.cpp` | 305 | AEAD implementation |
 | `steganosaurus/src/crypto/chacha20poly1305.h` | ~40 | AEAD header |
 | `steganosaurus/CMakeLists.txt` | 25 | Build configuration |
 
-**Total source code**: ~2,359 lines (excluding stb_image headers)
+**Total source code**: ~2,373 lines (excluding stb_image headers)
 **External dependencies**: None (stb_image/stb_image_write are single-file public domain headers)
 
 ---

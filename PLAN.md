@@ -12,8 +12,9 @@ TurtleFFT is a frequency-domain steganography system that hides encrypted data i
 
 ### Working directory status (as of last session)
 - **HEAD**: commit `64c2374` — "Increase default alpha from 0.50 to 0.80" (pushed to origin/main)
-- **Uncommitted changes**: None
+- **Uncommitted changes**: `steganosaurus/src/steganosaur.cpp` — added `--jpeg-out QUALITY` option (uses ImageMagick convert to create degraded JPEG from PNG output for social media upload simulation)
 - **Untracked files**: `stego/` directory (emu_original.png, emu_stego.png), `test_images/` directory (emu.png — a 1448×1086 PNG)
+- **Untracked files**: `test_load.jpg` (256×256 JPEG test image), `test_jpeg_robustness.sh` (JPEG robustness test script)
 - **Build exists**: `steganosaurus/build/turtlefft` and `steganosaurus/build/turtlefft-key` built and functional
 
 ### Key build command
@@ -84,6 +85,26 @@ No external dependencies — uses stb_image/stb_image_write (bundled in `include
    - Add small variance to α per bin: `α_i ~ N(μ, σ²)`
    - Blurs histogram peaks without full QIM complexity
    - Priority: Medium — quick win for detection resistance
+
+### JPEG Robustness & Format Support (New — Tier 2)
+
+1. **BER Analysis for JPEG Degradation** 
+   - Quantify bit error rate at different JPEG quality levels (Q30-Q100)
+   - Test script: `test_jpeg_robustness.sh`
+   - Current finding: All quality levels fail extraction (expected — phase data destroyed by JPEG)
+   - Next: Report BER% in extract output when magic not found
+
+2. **Reed-Solomon ECC for JPEG Resilience**
+   - Replace Repetition-7 with Reed-Solomon codes for better burst error correction
+   - Reed-Solomon can correct random errors more efficiently than Rep-7
+   - Target: Survive JPEG Q80+ compression with <1% BER
+   - Reference: HARDENING.md section 4 (Reed-Solomon recommendation)
+
+3. **Native JPEG Input Support**
+   - stb_image already supports JPEG loading — verify YCbCr→RGB conversion works correctly
+   - Test: embed into JPEG cover, extract from PNG stego (lossless output)
+   - Current test image: `test_load.jpg` (256×256 baseline JPEG)
+   - Note: JPEG input is fine; the problem is JPEG output/degradation destroys phase data
 
 ### Longer-Term Tasks (Tier 3 — Research)
 
