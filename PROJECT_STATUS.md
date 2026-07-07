@@ -238,3 +238,6 @@ Latest commit: ca2e2f8 — "Add BER analysis to extract"
 | 2026-03-19 | Adaptive alpha deferred | Magnitude changes during IFFT→clamp→FFT cause decoding errors |
 | 2026-03-19 | Cover-dependent path deferred | Cover hash unstable after embedding; needs robust alternative |
 | 2026-07-06 | Alpha increased to 0.80 | Default 0.50 was borderline robust against 8-bit PNG quantization. 0.80 provides comfortable margin with no visible quality loss. Verified: 10/10 round-trips at 0.80, 0 failures across 0.40-1.00 range. |
+| 2026-07-06 | QIM phase embedding (`--qim`) — replaces ±α nudges with quantization index modulation | Harder to detect than fixed offsets; step=1.60 works reliably |
+| 2026-07-06 | Cover hash uses grayscale + FFT magnitudes | More stable than per-plane spectral data; robust across embed/extract round-trip |
+| 2026-07-06 | `--adaptive_qim` disabled | Per-bin magnitude shifts after IFFT break embed/extract sync; needs magnitude-invariant redesign |

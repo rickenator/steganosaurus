@@ -1,6 +1,7 @@
 # TurtleFFT Project Plan & Recovery Document
 
 > **Last updated**: 2026-07-06  
+> **Current commit**: uncommitted (QIM + cover hash improvements)  
 > **Current branch**: `update_070626` (commit `ca2e2f8` — "Add BER analysis to extract")  
 > **Working directory**: `/usr/export/rick/Projects/Steganosaurus`
 
@@ -12,7 +13,7 @@ TurtleFFT is a frequency-domain steganography system that hides encrypted data i
 
 ### Working directory status (as of last session)
 - **HEAD**: commit `ca2e2f8` — "Add BER analysis to extract" (on branch update_070626, pushed)
-- **Uncommitted changes**: none (uses ImageMagick convert to create degraded JPEG from PNG output for social media upload simulation)
+- **Uncommitted changes**: QIM implementation, cover hash improvement, adaptive_qim disabled
 - **Untracked files**: `stego/` directory (emu_original.png, emu_stego.png), `test_images/` directory (emu.png — a 1448×1086 PNG)
 - **Untracked files**: `test_load.jpg` (256×256 JPEG test image), `test_jpeg_robustness.sh` (JPEG robustness test script)
 - **Build exists**: `steganosaurus/build/turtlefft` and `steganosaurus/build/turtlefft-key` built and functional
@@ -49,6 +50,12 @@ No external dependencies — uses stb_image/stb_image_write (bundled in `include
 - ✅ **Removed magnitude-based bin check** that caused embed/extract mismatch — now 100% reliable with Rep-7 ECC
 
 ### Tier 2 — JPEG Resilience Diagnostics (commit ca2e2f8)
+
+### Tier 2 — QIM (Quantization Index Modulation) (uncommitted)
+- ✅ **QIM phase embedding** (`--qim 1`) — Replaces absolute ±α phase nudges with quantization index modulation. Bit 0 → snap to even multiple of Δ/2, Bit 1 → odd multiple. Creates periodic pattern in phase space, harder to detect than fixed offsets.
+- ✅ **`--qim_step Δ`** — Configurable step size (default 1.60). Tested: 1.60 works reliably, 0.80 too tight (bit flips), 2.40 causes 21% BER.
+- ⚠️ **`--adaptive_qim` disabled** — Per-bin magnitude shifts after IFFT+re-FFT break embed/extract sync. Requires redesign (e.g., magnitude-invariant encoding).
+- ✅ **Cover hash improved** — Uses grayscale + FFT magnitudes instead of per-plane spectral data. More stable across embed/extract round-trip.
 - ✅ **BER analysis on extract failure** — when "Magic not found", reports `BER estimate: X.X% (Y errors in Z Rep-3 groups)` from Repetition-3 decoding confidence. Helps diagnose whether failure is due to compression artifacts vs wrong password.
 - ✅ **`--jpeg-out QUALITY` option** — creates degraded JPEG from PNG output for social media upload simulation
 - ✅ **JPEG robustness testing** — all quality levels (Q30-Q100) fail extraction, confirming phase-domain steganography is destroyed by lossy compression

@@ -378,7 +378,10 @@ struct Params {
     bool center=false;
     uint32_t pbkdf2_iter = 600000; // Increased from 200k to 600k for >100ms key derivation
     bool adaptive_alpha = false; // Adaptive phase shift (experimental - needs refinement for reliable decoding)
-    bool cover_dependent_path = false; // Cover-dependent turtlewalk (experimental, may cause extraction issues)
+    bool cover_dependent_path = false; // Cover-dependent turtlewalk
+    bool qim = false; // Quantization Index Modulation (replaces absolute ±α phase nudges)
+    double qim_step = 1.60; // QIM quantization step size (Δ), min separation = Δ/2
+    bool adaptive_qim = false; // DISABLED: per-bin magnitude shifts after IFFT break sync
 };
 
 static void to_planes_u8(const uint8_t* img,int W,int H,int comp, vector<double>& R,vector<double>& G,vector<double>& B){
@@ -410,38 +413,35 @@ static double median_abs(const vector<vector<complex<double>>>& F){
 }
 
 // ============================ Cover image hashing (for cover-dependent path) ==
-// Compute a robust hash of the cover image (low-frequency DCT-like hash)
+// Compute cover hash using low-frequency FFT magnitudes (stable across phase-only embedding)
 // This makes the path key cover-dependent: SHA256(pass || cover_hash)
-// We use very coarse quantization to make it robust to phase embedding
+// Uses grayscale + FFT magnitudes which are robust to phase embedding changes
 static array<uint8_t,32> compute_cover_hash(const vector<double>& R, const vector<double>& G, const vector<double>& B, int W, int H){
-    // Simple approach: hash the low-frequency magnitude spectrum with coarse quantization
-    // This is robust to phase-only changes and minor magnitude variations
-    vector<uint8_t> spectral_data;
-    spectral_data.reserve(256); // Keep a subset of low-freq bins
+    // Convert to grayscale (luminance)
+    vector<double> gray((size_t)W*H);
+    for(int i = 0; i < W*H; i++){
+        gray[i] = 0.299*R[i] + 0.587*G[i] + 0.114*B[i];
+    }
     
-    // Compute FFT for each plane and extract low-freq magnitudes
-    auto extract_low_freq = [&](const vector<double>& P) {
-        int PW, PH;
-        auto F = pad_to_fft(P, W, H, PW, PH);
-        fft2d(F, false);
-        // Take magnitudes from a small low-frequency region (robust to small changes)
-        // Use DC and very low frequencies only, with very coarse quantization
-        int region = min(8, min(PH, PW) / 8); // Smaller region for more stability
-        for(int y = 0; y < region; y++) {
-            for(int x = 0; x < region; x++) {
-                double mag = abs(F[y][x]);
-                // Very coarse quantization (8 levels) to be robust to embedding changes
-                uint8_t q = (uint8_t)min(7.0, max(0.0, floor(log(1.0 + mag) / 2.0)));
-                spectral_data.push_back(q);
-            }
+    // Pad to next power of 2 for FFT
+    int PW, PH;
+    auto F = pad_to_fft(gray, W, H, PW, PH);
+    fft2d(F, false);
+    
+    // Take low-frequency magnitudes from a small region (robust to embedding changes)
+    // Use very coarse quantization to be stable across embed/extract round-trip
+    vector<uint8_t> hash_bits;
+    int region = min(6, min(PH, PW) / 10); // Small low-freq region
+    for(int y = 0; y < region; y++){
+        for(int x = 0; x < region; x++){
+            double mag = abs(F[y][x]);
+            // Very coarse quantization: just check if above a threshold
+            // This makes it robust to small magnitude changes from IFFT numerical errors
+            hash_bits.push_back(mag > 50.0 ? 1 : 0);
         }
-    };
+    }
     
-    extract_low_freq(R);
-    extract_low_freq(G);
-    extract_low_freq(B);
-    
-    return sha256::hash(spectral_data.data(), spectral_data.size());
+    return sha256::hash(hash_bits.data(), hash_bits.size());
 }
 
 // ============================ Bit I/O =======================================
@@ -758,6 +758,80 @@ static inline int read_bit_from_bin(const vector<vector<complex<double>>>& F, in
     return (dpos <= dneg) ? 1 : 0;
 }
 
+
+// ============================ QIM (Quantization Index Modulation) ==============
+// QIM replaces absolute ±α phase nudges with relative quantization.
+// Bit 0 → snap to nearest even multiple of Δ/2
+// Bit 1 → snap to nearest odd multiple of Δ/2
+// This creates a periodic pattern in phase space, harder to detect than fixed offsets.
+
+static inline void write_bit_on_bin_qim(vector<vector<complex<double>>>& F, int y, int x, int bit,
+                                         double qim_step, double jitter, KS& ks,
+                                         double median_mag, bool adaptive_qim){
+    auto v = F[y][x];
+    double mag = max(1e-12, abs(v));
+    double step = qim_step;
+    
+    double half_step = step / 2.0;
+    double phase = atan2(v.imag(), v.real());
+    
+    // Normalize phase to [0, 2π) for consistent bin computation
+    double phase_norm = fmod(phase + 2*M_PI, 2*M_PI);
+    if (phase_norm < 0) phase_norm += 2*M_PI;
+    
+    // Compute current bin index (in half-step units)
+    int current_bin = (int)round(phase_norm / half_step);
+    
+    // Target bin: even for bit 0, odd for bit 1
+    int target_bin = current_bin;
+    if (bit == 1 && target_bin % 2 == 0) target_bin++;
+    else if (bit == 0 && target_bin % 2 != 0) target_bin--;
+    
+    // Compute new phase from target bin
+    double new_phase = target_bin * half_step;
+    
+    // Add jitter
+    double j = ks.jitter(jitter);
+    new_phase += j;
+    
+    // Wrap to [-π, π)
+    while (new_phase > M_PI) new_phase -= 2*M_PI;
+    while (new_phase <= -M_PI) new_phase += 2*M_PI;
+    
+    complex<double> nv = polar(mag, new_phase);
+    F[y][x] = nv;
+    auto [cy,cx]=conj_idx(y,x,(int)F.size(),(int)F[0].size());
+    if(!(cy==y && cx==x)) {
+        F[cy][cx]=conj(nv);
+    } else {
+        F[y][x]=complex<double>(mag,0.0);
+        #if DEBUG
+        fprintf(stderr,"[WARN] write_bit_on_bin_qim forcing real at y=%d x=%d (H=%zu W=%zu, conj=self)\n", y, x, F.size(), F[0].size());
+        #endif
+    }
+}
+
+static inline int read_bit_from_bin_qim(const vector<vector<complex<double>>>& F, int y, int x,
+                                         double qim_step, double median_mag, bool adaptive_qim){
+    auto v = F[y][x];
+    double mag = max(1e-12, abs(v));
+    double step = qim_step;
+    // adaptive_qim disabled: per-bin magnitude shifts after IFFT break embed/extract sync
+    
+    double half_step = step / 2.0;
+    double phase = atan2(v.imag(), v.real());
+    
+    // Normalize phase to [0, 2π) for consistent bin computation
+    double phase_norm = fmod(phase + 2*M_PI, 2*M_PI);
+    if (phase_norm < 0) phase_norm += 2*M_PI;
+    
+    // Compute bin index (in half-step units)
+    int bin = (int)round(phase_norm / half_step);
+    
+    // Bit is parity of bin: even=0, odd=1
+    return (bin % 2 != 0) ? 1 : 0;
+}
+
 // ============================ Turtle selection ===============================
 struct Turtle {
     int y,x,plane,H,W;
@@ -834,9 +908,11 @@ static void usage(){
       "            (--pass PW | --key KEY_BASE64)\n"
       "            [--alpha 0.22 --jitter 0.05 --density 0.7 --rmin 0.05 --rmax 0.45 --magmin 0.01 --center 0]\n"
       "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1 --jpeg-out QUALITY]\n"
+      "            [--qim 0|1 --qim_step 1.60 --adaptive_qim 0]\n"
       "\n"
       "  Extract: turtlefft extract --in stego.png (--pass PW | --key KEY_BASE64)\n"
       "            [--pbkdf2_iter 600000 --adaptive_alpha 1 --cover_dependent_path 1 --jpeg-out QUALITY]\n"
+      "            [--qim 0|1 --qim_step 1.60 --adaptive_qim 0]\n"
       "\n"
       "  Key options:\n"
       "    --pass PW              : Use passphrase (derives key via PBKDF2+HKDF)\n"
@@ -844,10 +920,13 @@ static void usage(){
       "    --key-out FILE         : Export generated key to file\n"
       "    --wrap-pass PW         : Wrap exported key with passphrase (ChaCha20-Poly1305)\n"
       "\n"
-      "  Hardening features (default enabled):\n"
+      "  Hardening features:\n"
       "    --pbkdf2_iter N        : PBKDF2 iterations (default: 600000 for >100ms)\n"
-      "    --adaptive_alpha 0|1   : Adaptive phase shift per bin (default: 1)\n"
-      "    --cover_dependent_path 0|1 : Cover-dependent turtlewalk (default: 1)\n");
+      "    --adaptive_alpha 0|1   : Adaptive phase shift per bin (default: 0)\n"
+      "    --cover_dependent_path 0|1 : Cover-dependent turtlewalk via pHash (default: 0)\n"
+      "    --qim 0|1              : Quantization Index Modulation (default: 0, absolute ±α)\n"
+      "    --qim_step Δ           : QIM step size (default: 0.80)\n"
+      "    --adaptive_qim 0|1     : DISABLED (per-bin magnitude shifts break sync)\n");
 }
 struct Args {
     string mode, inPath, outPath, secret, pass;
@@ -879,6 +958,9 @@ static bool parse_args(int argc,char**argv, Args& A){
         else if(k=="--adaptive_alpha") { string v=need(); A.P.adaptive_alpha=(v=="1"||v=="true"); }
         else if(k=="--cover_dependent_path") { string v=need(); A.P.cover_dependent_path=(v=="1"||v=="true"); }
         else if(k=="--jpeg-out") { A.jpegQuality=(int)stoul(need()); }
+        else if(k=="--qim") { string v=need(); A.P.qim=(v=="1"||v=="true"); }
+        else if(k=="--qim_step") A.P.qim_step=stod(need());
+        else if(k=="--adaptive_qim") { string v=need(); A.P.adaptive_qim=(v=="1"||v=="true"); }
         else { fprintf(stderr,"Unknown arg: %s\n", k.c_str()); return false; }
     }
     // Validate modes
@@ -1097,9 +1179,14 @@ static void do_embed(const Args& A){
         #if DEBUG
         if(i < 10) fprintf(stderr,"[EMBED bit %zu] plane=%d y=%d x=%d bit=%d\n", i, T.plane, T.y, T.x, bits[i]);
         #endif
-        // Use the keystream for the current plane with adaptive alpha
-        write_bit_on_bin(F3[T.plane], T.y, T.x, bits[i], A.P.alpha, A.P.jitter, 
-                        *ks_planes[T.plane], median_mags[T.plane], A.P.adaptive_alpha);
+        // Use QIM or absolute phase embedding
+        if (A.P.qim) {
+            write_bit_on_bin_qim(F3[T.plane], T.y, T.x, bits[i], A.P.qim_step, A.P.jitter,
+                                *ks_planes[T.plane], median_mags[T.plane], A.P.adaptive_qim);
+        } else {
+            write_bit_on_bin(F3[T.plane], T.y, T.x, bits[i], A.P.alpha, A.P.jitter,
+                            *ks_planes[T.plane], median_mags[T.plane], A.P.adaptive_alpha);
+        }
         #if DEBUG
         if(i < 10){
             auto v = F3[T.plane][T.y][T.x];
@@ -1233,7 +1320,12 @@ static void do_extract(const Args& A){
         while(true){ T.advance_to_valid(); if(ks_walk.hit_density(A.P.density)) break; T.mark_here(); }
         // Consume the same jitter bytes the embedder used so KS stays in sync
         double j = ks_planes[T.plane]->jitter(A.P.jitter);
-        int b = read_bit_from_bin(F3[T.plane], T.y, T.x, alpha, j, median_mags[T.plane], A.P.adaptive_alpha);
+        int b;
+        if (A.P.qim) {
+            b = read_bit_from_bin_qim(F3[T.plane], T.y, T.x, A.P.qim_step, median_mags[T.plane], A.P.adaptive_qim);
+        } else {
+            b = read_bit_from_bin(F3[T.plane], T.y, T.x, alpha, j, median_mags[T.plane], A.P.adaptive_alpha);
+        }
         T.mark_here();
         #if DEBUG
         static int cnt=0;

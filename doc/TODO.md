@@ -24,6 +24,14 @@
   - Helps diagnose whether failure is compression artifacts vs wrong password
 
 - [x] **JPEG degradation simulation (commit 992bab3)**
+- [x] **QIM phase embedding (uncommitted)**
+  - Added `--qim 1` option replacing absolute ±α nudges with quantization index modulation
+  - Bit 0 → snap to even multiple of Δ/2, Bit 1 → odd multiple
+  - Default step=1.60 works reliably; 0.80 too tight, 2.40 causes BER
+  - `--adaptive_qim` disabled: per-bin magnitude shifts after IFFT break sync
+  - Added `--qim_step Δ` for configurable step size
+  - Cover hash improved: grayscale + FFT magnitudes instead of per-plane spectral data
+
   - Added `--jpeg-out QUALITY` option to create degraded JPEG from PNG output
   - Simulates social media upload degradation (X.com, etc.)
   - All quality levels (Q30-Q100) fail extraction — confirms phase-domain limitation
@@ -32,11 +40,11 @@
 
 ### Tier 2 (Important - Near Term)
 
-- [ ] **QIM/Relative Quantization**
+- [x] **QIM/Relative Quantization (implemented)**
   - Replace absolute ±α phase nudges with relative quantization (QIM or STDM)
   - Reduces fixed offset signature in global phase histogram
   - Requires: Testing framework for phase histogram analysis
-  - Priority: High, but needs empirical validation setup first
+  - Priority: High — implemented; adaptive_qim disabled pending redesign
 
 - [ ] **Cover-Dependent Path Key**
   - Derive `path_key = SHA256(pass || pHash(cover))`

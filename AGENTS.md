@@ -80,7 +80,7 @@ steganosaurus/
 │   ├── stb_image.h           # Image loading (single-file, public domain)
 │   └── stb_image_write.h     # Image writing (single-file, public domain)
 ├── src/
-│   ├── steganosaur.cpp       # Main implementation (1427 lines)
+│   ├── steganosaur.cpp       # Main implementation (1553 lines)
 │   │   # SHA-256 (self-implemented)
 │   │   # PBKDF2-HMAC-SHA256 (self-implemented)
 │   │   # HKDF (self-implemented)
@@ -149,7 +149,7 @@ steganosaurus/
 ## File-Specific Notes
 
 ### `steganosaurus/src/steganosaur.cpp`
-- **~1428 lines** — the entire application in one file (alpha increased to 0.80, commit 64c2374)
+- **~1553 lines** — the entire application in one file (QIM added, cover hash improved)
 - Contains: SHA-256, PBKDF2, HKDF, FFT, ECC, turtlewalk, embed, extract, CLI, gen-key
 - **Line ranges** (for reference):
   - 1-100: Includes, stb_image/stb_image_write, SHA-256
@@ -157,7 +157,7 @@ steganosaurus/
   - 300-500: 2D FFT, complex number utilities
   - 500-700: ECC encoding/decoding (Rep-3, Hamming(7,4), Rep-7)
   - 700-900: Turtlewalk path generation, bin selection
-  - 900-1100: `do_embed()` — encrypt, ECC encode, embed in phase, IFFT
+  - 768-850: QIM (Quantization Index Modulation) — write_bit_on_bin_qim, read_bit_from_bin_qim
   - 1100-1300: `do_extract()` — FFT, extract phases, ECC decode, decrypt
   - 1300-1427: CLI parsing, `do_gen_key()`, `main()`
 - **DEBUG macro** (line 9): Set to 0 for production. Set to 1 for verbose output.
