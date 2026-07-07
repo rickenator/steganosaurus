@@ -204,9 +204,18 @@ Latest commit: ca2e2f8 — "Add BER analysis to extract"
 
 ## Known Issues & Technical Debt
 
+### JPEG Input Support Notes
+- stb_image handles YCbCr→RGB conversion automatically for JPEG loading
+- Verified: JPEG embed works, extract from PNG stego output works for 256×256 images
+- **Known limitation**: Images >256×256 fail round-trip (pre-existing bug, not related to JPEG support)
+- **Root cause**: TBD - likely related to FFT padding or turtlewalk path generation for larger images
+- **Workaround**: Use 256×256 test images for verification; larger images need separate investigation
+
+
 | # | Issue | Priority | Notes |
 |---|-------|----------|-------|
-| 1 | Untracked stego/ and test_images/ directories | Low | Add to .gitignore if unwanted |
+| 1 | Reed-Solomon ECC implementation deferred | Medium | GF tables had bugs; Rep-7 still works for PNG. RS needed for JPEG resilience.
+| 2 | Untracked stego/ and test_images/ directories | Low | Add to .gitignore if unwanted |
 | 2 | Untracked stego/ and test_images/ directories | Low | Add to .gitignore if unwanted |
 | 3 | Experimental features (`--adaptive_alpha`, `--cover_dependent_path`) break extraction | Medium | Documented; need QIM redesign |
 | 4 | No CI/CD pipeline | Medium | Add GitHub Actions per TESTING.md |
