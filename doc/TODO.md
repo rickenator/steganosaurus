@@ -18,6 +18,16 @@
   - Added doc/TODO.md tracking roadmap
   - Updated README.md security section with detailed notes
 
+- [x] **BER analysis on extract failure (commit ca2e2f8)**
+  - When "Magic not found", reports BER% from Repetition-3 decoding confidence
+  - Format: `BER estimate: X.X% (Y errors in Z Rep-3 groups)`
+  - Helps diagnose whether failure is compression artifacts vs wrong password
+
+- [x] **JPEG degradation simulation (commit 992bab3)**
+  - Added `--jpeg-out QUALITY` option to create degraded JPEG from PNG output
+  - Simulates social media upload degradation (X.com, etc.)
+  - All quality levels (Q30-Q100) fail extraction — confirms phase-domain limitation
+
 ## Deferred for Separate Work
 
 ### Tier 2 (Important - Near Term)
