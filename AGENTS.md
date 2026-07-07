@@ -213,6 +213,13 @@ Failure to keep these in sync is considered a defect. A fresh session **must** b
 - [ ] `doc/TODO.md` — Completed items moved to "Recently Completed"
 - [ ] `AGENTS.md` — Updated any defaults, line counts, or conventions that changed
 
+### Branch & Sync Workflow
+- **Branch naming**: Use `update_YYMMDD` format for feature branches (e.g., `update_070626`)
+- **Sync before push**: After every commit, update PLAN.md, PROJECT_STATUS.md, and doc/TODO.md
+- **Push to origin**: Always push new branches with `-u origin <branch>` so GitHub PR can be created
+- **PR creation**: Use the remote URL provided by `git push` output (e.g., `https://github.com/rickenator/steganosaurus/pull/new/update_070626`)
+- **Current branch**: `update_070626` — JPEG robustness workflow (commit `992bab3`)
+
 ---
 
 ## Recovery Guide (If Session Crashes)
